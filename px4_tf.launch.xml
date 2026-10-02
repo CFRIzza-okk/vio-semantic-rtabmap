@@ -1,0 +1,13 @@
+<launch>
+  <arg name="fcu_url" default="serial:///dev/ttyACM0:115200" />
+  <node pkg="mavros" exec="mavros_node" name="mavros" namespace="/" output="screen">
+    <param name="fcu_url" value="$(var fcu_url)" />
+    <param name="gcs_url" value="" />
+    <param name="tgt_system" value="1" />
+    <param name="tgt_component" value="1" />
+    <param name="fcu_protocol" value="v2.0" />
+    <param from="$(find-pkg-share mavros)/launch/px4_pluginlists.yaml" />
+    <param from="$(find-pkg-share mavros)/launch/px4_config.yaml" />
+    <param from="$(env HOME)/VIO/px4_tf_config.yaml" />
+  </node>
+</launch>

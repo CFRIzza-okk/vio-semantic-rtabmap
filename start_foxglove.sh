@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  start_foxglove.sh —— 把 ROS 2 话题推给另一台电脑上的 Foxglove Studio
+#
+#  ============================================================================
+#  为什么用它，而不是 RViz
+#  ============================================================================
+#  实测：在这台 Orin NX 上跑 RViz 看建图，RViz 自己要吃掉一整个 CPU 核
+#  （实测 84% CPU，整机只有 6 核），**但还是追不上点云的发布速度**，
+#  消息过滤器不停地把数据丢掉 —— 一次运行里丢了 7673 条消息。
+#  结果就是界面看着像卡死/定格：不是它不画，是它把数据全扔了。
+#
+#  Foxglove 把「渲染」放到另一台电脑上，Jetson 这边只负责把消息序列化后
+#  经 WebSocket 发出去，不画一个像素。这是这台算力紧张的机器上最合适的
+#  可视化方案，也是答辩演示时最稳的：观众电脑上看，Jetson 专心建图。
+#
+#  ============================================================================
+#  用法
+#  ============================================================================
+#    第 1 步（只需做一次）：装 foxglove_bridge
+#        sudo apt update && sudo apt install -y ros-humble-foxglove-bridge
+#
+#    第 2 步：正常启动建图（建议 --no-rviz）
+#        cd ~/VIO && ./run_once.sh --no-rviz
+#
+#    第 3 步：另开一个终端，启动本脚本
+#        cd ~/VIO && ./start_foxglove.sh
+#
+#    第 4 步：在【另一台电脑】上打开 Foxglove Studio，连接
+#        ws://192.168.1.8:8765
+#      （IP 以本脚本启动时打印的为准，换网络会变）
+#
+#  ⚠ 强烈建议用 Foxglove 的**桌面版**，不要用网页版。
+#    网页版是 https 页面，浏览器会以"混合内容"为由拦掉 ws:// 连接
+#    （只有连 localhost 才放行）。桌面版没有这个限制。
+#
+#  ============================================================================
+#  连上之后看什么
+#  ============================================================================
+#  在 Foxglove 里加一个 3D 面板，Fixed Frame 设成 `map`，然后加这些话题：
+#
+#    /rtabmap/cloud_map        点云地图 —— ⭐ 主角，看建图效果
+#    /rtabmap/map              二维占据栅格（后续 Nav2 用这个）
+#    /rtabmap/odom_local_map   里程计局部地图
+#    /semantics/map_markers    语义物体标记（桌子/微波炉那些）
+#    /tf  /tf_static           坐标轴
+#
+#  ⚠ 注意：RViz 配置里那几个 rtabmap 专用显示（MapCloud / MapGraph）在
+#    Foxglove 里**显示不出来** —— 它们用的是 rtabmap 自己的插件和自定义
+#    消息类型（rtabmap_msgs/MapData、MapGraph），Foxglove 不认识。
+#    要看点云必须用上面那个标准的 `/rtabmap/cloud_map`（sensor_msgs/PointCloud2）。
+#    MapGraph（回环连线）在 Foxglove 里没有对应显示，看回环请直接看日志里的
+#    "回环检测: N 次"，或者用 RViz 事后回看。
+# ============================================================================
+
+set -uo pipefail
+set +u   # ROS 的 setup.bash 里有未定义变量
+
+source /opt/ros/humble/setup.bash
+
+# ⚠ 必须再 source 语义工作空间，否则 bridge 不认识我们自定义的消息类型。
+#   漏了这一步的典型报错（实测踩过）：
+#     Failed to load schemaDefinition for topic "/semantics/objects_tracked"
+#     (semantic_rtabmap_msgs/msg/SemanticObjectArray): package
+#      'semantic_rtabmap_msgs' not found, searching: [...]
+#   原因是 foxglove_bridge 通过 AMENT_PREFIX_PATH 去找消息定义，而
+#   /opt/ros/humble 里没有我们自己的包。后果是 Foxglove 里那几个语义话题
+#   显示不出来（**点云不受影响** —— /rtabmap/cloud_map 是标准
+#   sensor_msgs/PointCloud2，不需要任何自定义定义）。
+#   顺序很重要：/opt/ros/humble 必须在前，语义工作空间在后。
+SEMANTIC_WS="$HOME/VIO/semantic_ws/install/setup.bash"
+if [ -f "$SEMANTIC_WS" ]; then
+  source "$SEMANTIC_WS"
+else
+  echo "[警告] 未找到 $SEMANTIC_WS"
+  echo "       语义话题（/semantics/*）在 Foxglove 里会解码失败，点云仍可用。"
+  echo "       若尚未编译：cd ~/VIO/semantic_ws && colcon build --symlink-install --parallel-workers 1"
+fi
+
+PORT="${PORT:-8765}"
+
+# ---------------- 前置检查 ----------------
+if ! ros2 pkg prefix foxglove_bridge >/dev/null 2>&1; then
+  echo "============================================================"
+  echo "  foxglove_bridge 尚未安装"
+  echo "============================================================"
+  echo ""
+  echo "  请先执行（需要 sudo 密码，所以只能你自己来）："
+  echo ""
+  echo "      sudo apt update && sudo apt install -y ros-humble-foxglove-bridge"
+  echo ""
+  echo "  装完再运行本脚本。"
+  echo ""
+  echo "  说明：这个包在 apt 源里是现成的（ros-humble-foxglove-bridge 3.5.0，"
+  echo "        约 12MB，依赖都是标准 ROS 2 Humble 组件），不需要编译。"
+  exit 1
+fi
+
+# 消息定义检查：没有它，语义话题在 Foxglove 里解码不出来。
+# 这里显式检查一次，而不是等 bridge 启动后刷一屏 WARN/ERROR —— 那时人往往
+# 会以为是 bridge 坏了，其实是环境没 source 对。
+if ros2 pkg prefix semantic_rtabmap_msgs >/dev/null 2>&1; then
+  echo "[OK] 语义消息包已找到: $(ros2 pkg prefix semantic_rtabmap_msgs)"
+else
+  echo "[警告] 找不到 semantic_rtabmap_msgs！语义话题将无法在 Foxglove 里显示。"
+  echo "       （点云 /rtabmap/cloud_map 不受影响，它是标准类型，仍可正常显示）"
+  echo "       请确认已 source ~/VIO/semantic_ws/install/setup.bash 且工作空间已编译。"
+fi
+echo ""
+
+# ---------------- 打印本机地址，方便对端连接 ----------------
+echo "============================================================"
+echo "  Foxglove Bridge 启动中"
+echo "============================================================"
+echo ""
+echo "  端口: $PORT"
+echo ""
+echo "  在另一台电脑的 Foxglove Studio（桌面版）里连接以下地址："
+echo ""
+# 只列出真实网卡的地址，跳过 docker0 之类的虚拟网卡
+ip -4 addr show 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | grep -v '^172\.17\.' | while read -r cidr; do
+  ip_only="${cidr%%/*}"
+  echo "      ws://${ip_only}:${PORT}"
+done
+echo ""
+echo "  提示：对端电脑要和这台机器在【同一个局域网】。"
+echo "        本脚本启动时会打印实际可用的地址，以那个为准。"
+echo ""
+echo "  按 Ctrl+C 停止"
+echo "============================================================"
+echo ""
+
+# ---------------- 启动 ----------------
+# 故意只用 port / address 两个参数：
+#   这两个是 foxglove_bridge 最稳定的接口。其它调优参数（topic_whitelist、
+#   max_qos_depth、send_buffer_limit 等）不同版本名字有差异，写错了会导致
+#   节点直接起不来。等确认能跑通之后，再按需要加上去调优。
+#
+# address 用 0.0.0.0 是必须的：默认只监听本地的话，另一台电脑连不上。
+exec ros2 run foxglove_bridge foxglove_bridge --ros-args \
+  -p port:="$PORT" \
+  -p address:=0.0.0.0

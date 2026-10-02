@@ -1,0 +1,3 @@
+# Intel RealSense D400 USB device access (D435/D435i and related models).
+# Rule follows the official librealsense VID/PID-to-plugdev policy.
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="8086", MODE:="0666", GROUP="plugdev"

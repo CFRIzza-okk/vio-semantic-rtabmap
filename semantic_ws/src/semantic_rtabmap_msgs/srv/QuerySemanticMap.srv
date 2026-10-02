@@ -1,0 +1,14 @@
+# 按语义类别 / 实例查询语义地图
+# 供 navigator_node 做"去椅子那里"这类目标点导航
+
+string class_name           # 类别名；空字符串 = 不限类别
+int32  instance_id          # 指定实例；<=0 = 不限实例
+float32 max_distance        # 距离上限（米）；<=0 = 不限距离
+
+# 距离计算的参考点；与 header 无关，直接给 map 系坐标
+geometry_msgs/Point query_origin
+bool   use_query_origin     # false 时忽略 query_origin 与 max_distance
+---
+bool success
+string message
+SemanticObject[] objects

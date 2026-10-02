@@ -1,0 +1,92 @@
+# semantic_mapper 参数（Phase 2：多帧融合 -> 持久语义地图）
+# 用法: ros2 run semantic_rtabmap mapper_node --ros-args --params-file <本文件>
+
+semantic_mapper:
+  ros__parameters:
+    # ---------------- 话题与服务 ----------------
+    objects_topic: "/semantics/objects"
+    objects_tracked_topic: "/semantics/objects_tracked"
+    map_markers_topic: "/semantics/map_markers"
+    landmarks_topic: "/semantics/landmarks"
+    # 其余地标输出（逗号分隔）。RTAB-Map 侧订阅名硬编码为相对名 landmark_detections，
+    # 会跟着它自己的命名空间走：
+    #   - 走官方 rtabmap.launch.py（namespace 默认 'rtabmap'）-> /rtabmap/landmark_detections
+    #   - 直接 ros2 run rtabmap_slam rtabmap（无命名空间）    -> /landmark_detections
+    # 两个都发就不必依赖别人的启动方式，代价极小。
+    # 置 "" = 关闭这一路，只保留 /semantics/landmarks。
+    rtabmap_landmarks_topics: "/rtabmap/landmark_detections,/landmark_detections"
+    query_service: "/semantic_mapper/query"
+
+    # ---------------- 数据关联 ----------------
+    # 关联门限 = assoc_base_gate + assoc_size_factor * 物体尺度
+    # 杯子(0.15m) -> 0.6+0.75*0.15 = 0.71m
+    # 汽车(3.5m)  -> 0.6+0.75*3.5  = 3.2m（被 assoc_max_gate 截到 3.0）
+    assoc_base_gate: 0.6
+    assoc_size_factor: 0.75
+    assoc_max_gate: 3.0
+
+    # 累计观测多少次才算"确认物体"并进入语义地图
+    min_observations: 3
+    # 融合置信度低于此值的轨迹不进地图
+    min_confidence: 0.3
+    # 未确认轨迹多久没被看到就删除（秒）
+    prune_age: 30.0
+    # 用匈牙利算法做全局最优分配（物体密集时比贪心稳）
+    use_hungarian: true
+
+    # ---------------- 输出 ----------------
+    map_frame: "map"
+    # 地标位姿参考系: "camera" = 按 RTAB-Map 官方约定(与 apriltag_ros 一致, 推荐)
+    #                "map"    = 直接发 map 系坐标(RTAB-Map 会多做一次运动补偿)
+    landmarks_frame_mode: "camera"
+    camera_frame: "camera_color_optical_frame"
+    # 是否把物体作为 LandmarkDetections 发布给 RTAB-Map
+    publish_landmarks: true
+    marker_publish_period: 1.0
+    log_period: 15.0
+
+    # ---------------- 语义质量自适应的地标协方差（核心创新）----------------
+    # 背景：RTAB-Map 的 MsgConversion.cpp:1996-2003 只检查协方差的 (0,0)。
+    #   全零  -> 用**全局** landmark_linear_variance 填充所有地标
+    #            （看到一个 3 次的透明瓶子和看到 100 次的不透明柜子，约束一样强）
+    #   非零  -> **原样采用**我们给的协方差
+    # 所以这里按每个地标自身的语义质量/材质类别算协方差，把"该有多可信"
+    # 的决定权从 RTAB-Map 的全局常数拿回到语义层。见 landmark_quality.py。
+    #
+    #   "uniform" = 发全零协方差，退回 RTAB-Map 全局参数
+    #               —— **当前默认值**，等价于改动前的行为。
+    #   "quality" = 自适应（本方案）
+    #               ⚠ 尚未在真实序列上量化对 ATE/RPE 的影响，
+    #                 跑完对照实验前不要启用。
+    landmark_covariance_mode: "uniform"
+
+    # 质量 q=1 时的位置标准差(m)。0.20 -> 方差 0.04，与原有
+    # tag_linear_variance:=0.04 完全一致，保证改动相对基线可对照。
+    quality_base_sigma: 0.20
+    quality_min_sigma: 0.05
+    quality_max_sigma: 5.00
+
+    # 【关键不变量】必须 >= 9999。否则 OptimizerGTSAM.cpp:362-364 会改用
+    # BetweenFactor<Pose3> 并要求地标朝向可信，而 YOLO 的 yaw 并不可靠。
+    # 注意：一旦发了非零协方差，全局 tag_angular_variance 就**不再生效**。
+    quality_angular_variance: 1.0e6
+
+    # 质量因子的归一化尺度
+    quality_evidence_tau: 3.0      # 等效独立观测数的饱和尺度
+    quality_density_ref: 0.60      # 深度支撑密度达到此值即视为满分
+
+    # 材质判别阈值（初步值：依据 E5，透明瓶约 0.20、不透明标定板约 0.96；
+    # ⚠ 不透明类目前 n=1，补齐椅子/书样本后需重新标定）
+    quality_penetrable_density: 0.35
+    quality_opaque_density: 0.60
+
+    # 材质带来的额外方差增益（弱化约束）
+    quality_gain_penetrable: 2.5
+    quality_gain_uncertain: 1.5
+
+    # ---------------- 持久化 ----------------
+    # 留空 = 关闭。开启后每 30 秒和退出时保存一份 JSON。
+    # 注意：只有当 map 原点在不同会话间保持一致时，重新加载才有意义。
+    # PX4 的 local_position 原点每次上电都会变，所以实机上通常不要开。
+    persistence_path: ""
+    load_on_startup: false

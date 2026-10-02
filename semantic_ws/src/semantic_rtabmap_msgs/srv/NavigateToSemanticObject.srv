@@ -1,0 +1,47 @@
+# ============================================================
+#  语义目标点导航请求
+#
+#  例: 飞到最近的 "chair" 前 1.5 米处, 高度 1.2 米
+#
+#  ros2 service call /navigator/navigate_to_semantic_object semantic_rtabmap_msgs/srv/NavigateToSemanticObject "{class_name: 'chair', standoff_distance: 1.5, altitude: 1.2}"
+#
+#  注意: .srv/.msg 的注释里不能出现反斜杠, 会被 rosidl 当成转义序列
+# ============================================================
+
+# 目标物体类别(COCO 类别名, 如 "chair"/"person"/"car")
+# 留空 = 不限类别, 直接取距离最近的已确认物体
+string class_name
+
+# 指定实例 id; 0 = 不指定, 由导航层按距离自动选择最近的匹配物体
+int32 instance_id
+
+# 停在目标物体前方多远(米, 水平距离)
+# 设 0 会直接飞到物体位置 —— 不安全, 仅调试用
+float32 standoff_distance
+
+# 期望飞行高度(米, 相对 map 帧原点)
+# 负数 = 保持当前高度不变
+float32 altitude
+
+# 本次导航的超时时间(秒); 0 = 使用参数 default_timeout
+float64 timeout
+
+---
+# 是否成功接受请求并规划出路径
+bool success
+
+# 人类可读的结果说明(失败原因 / 目标描述)
+string message
+
+# 实际选中的停靠点(map 帧)
+# 注意: 这是"停靠点"而不是物体本身的位置, 两者相差 standoff_distance
+geometry_msgs/PoseStamped target_pose
+
+# 实际选中的物体实例 id
+int32 target_instance_id
+
+# 目标物体本身的类别名(便于确认选对了目标)
+string target_class
+
+# 收到请求时, 载具到目标停靠点的直线距离(米)
+float32 initial_distance

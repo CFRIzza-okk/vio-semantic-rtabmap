@@ -1,0 +1,40 @@
+# ROS / colcon generated artifacts
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+
+# Experiment data, ROS bags, derived datasets and outputs
+/data/
+
+# Upstream RTAB-Map checkouts (nested third-party Git repositories)
+/rtabmap_cuda_ws/src/rtabmap/
+/rtabmap_cuda_ws/src/rtabmap_ros/
+
+# One-off cleanup artifacts / history archives (not source)
+/cleanup_backup_*/
+
+# Python generated files and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editors and OS metadata
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Logs and temporary files
+*.log
+*.tmp
+*.out
+
+# Runtime logs directory
+/rtabmap_cuda_ws/logs/

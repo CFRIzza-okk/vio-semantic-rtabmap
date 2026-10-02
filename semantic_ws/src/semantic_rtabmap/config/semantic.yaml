@@ -1,0 +1,53 @@
+# semantic_detector 参数（Phase 1：2D 检测 -> 3D 语义物体）
+# 用法: ros2 run semantic_rtabmap detector_node --ros-args --params-file <本文件>
+
+semantic_detector:
+  ros__parameters:
+    # ---------------- 话题 ----------------
+    rgb_topic: "/camera/camera/color/image_raw"
+    depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
+    camera_info_topic: "/camera/camera/color/camera_info"
+    objects_topic: "/semantics/objects"
+    markers_topic: "/semantics/markers"
+    debug_image_topic: "/semantics/debug_image"
+    label_markers_topic: "/semantics/label_markers"
+    publish_label_markers: true
+    colored_cloud_topic: "/semantics/colored_cloud"
+    publish_colored_cloud: true
+    # 2 表示每隔一个像素取一个点，降低 Jetson 点云发布开销；调试细节可改为 1
+    colored_cloud_stride: 2
+
+    # ---------------- 模型 ----------------
+    # Orin NX 实测: yolo11n.engine (TensorRT) 19 ms/帧 ≈ 52 FPS
+    #               yolo11n.pt     (PyTorch)   28 ms/帧 ≈ 35 FPS
+    model_path: "/home/jetson/ultralytics/ultralytics/yolo11n.engine"
+    device: "0"
+    conf_threshold: 0.35
+    iou_threshold: 0.45
+    max_detections: 30
+
+    # 类别白名单，逗号分隔；留空表示使用 COCO 全部 80 类。
+    # 无人机语义导航建议只留关心的几类，能显著降低误检和下游关联难度：
+    # class_filter: "person,car,chair,bottle,backpack"
+    class_filter: ""
+
+    # ---------------- 坐标系 ----------------
+    # PX4/MAVROS 在跑时用 map；只测相机时改成 camera_link
+    target_frame: "map"
+    camera_frame: "camera_color_optical_frame"
+    use_latest_tf: true
+    tf_timeout: 0.05
+
+    # ---------------- 反投影 ----------------
+    depth_scale: 0.001          # 16UC1 毫米 -> 米
+    min_depth: 0.25
+    max_depth: 12.0
+    roi_ratio: 0.6              # 只在检测框中心 60% 区域采样，回避 depth bleeding
+    depth_percentile: 20.0      # 取 20 分位数，偏向物体前景而非背景
+    depth_tolerance: 0.35       # 深度一致性聚类阈值（米）
+    min_valid_px: 12
+
+    # ---------------- 其它 ----------------
+    publish_debug_image: true
+    sync_slop: 0.08
+    sync_queue: 10

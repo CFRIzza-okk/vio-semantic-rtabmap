@@ -1,0 +1,24 @@
+# ============================================================
+#  导航控制指令
+#
+#  到点后导航层会停在 HOLD 状态等待外部指令, 用本服务下达下一步动作。
+#
+#  例: ros2 service call /navigator/control semantic_rtabmap_msgs/srv/NavigationControl "{command: 'hold'}"
+#
+#  注意: .srv/.msg 的注释里不能出现反斜杠, 会被 rosidl 当成转义序列
+# ============================================================
+
+# 指令内容, 可选:
+#   "hold"        - 在当前点悬停(清除目标, 进入 HOLD)
+#   "cancel"      - 取消当前导航任务, 回到 IDLE
+#   "land"        - 原地降落(由载具后端实现)
+#   "return_home" - 返回 map 原点上方
+string command
+
+---
+bool success
+
+string message
+
+# 执行后的导航状态
+string state
