@@ -44,7 +44,7 @@ Visualization Manager:
       Value: true
     # 语义地图：全局已确认地标，每个 1 Hz 重发一次，开销很小
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: Semantic Map (/semantics/map_markers)
       Namespaces:
         {}
@@ -57,7 +57,7 @@ Visualization Manager:
       Value: true
     # 当前帧的检测框（还没进地图的原始观测）
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: Semantic Detections (/semantics/markers)
       Namespaces:
         {}
