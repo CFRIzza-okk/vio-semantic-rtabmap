@@ -223,12 +223,15 @@ class SemanticMapper(Node):
             self._load()
 
         # ------------------------- 接口 -------------------------
-        self.create_subscription(
-            SemanticObjectArray,
-            gp("objects_topic").value,
-            self._on_objects,
-            10,
-        )
+        # 【顺序很重要，不要调整】
+        # TransformListener(spin_thread=True) 在上面已经起了一个**独立自旋线程**，
+        # 所以 create_subscription 一旦执行，_on_objects 就可能**在另一个线程上**
+        # 被调用。如果发布者晚于订阅创建，回调就会撞上尚未赋值的属性，抛
+        # AttributeError —— 而且这个异常会顺着 TF 监听线程冒出去，把 TF 监听打死。
+        #
+        # 实测必现条件：节点启动时检测话题已经在高频发布（例如重起语义层、
+        # 或另起一个观测用 mapper）。此时消息会在几毫秒内到达。
+        # 因此：所有发布者一律先于订阅建立。
         self.pub_tracked = self.create_publisher(
             SemanticObjectArray, gp("objects_tracked_topic").value, 10
         )
@@ -253,6 +256,14 @@ class SemanticMapper(Node):
             self.pub_landmarks_rtabmap = []
             if self.publish_landmarks and not _HAS_RTABMAP:
                 self.get_logger().warn("未找到 rtabmap_msgs, 地标发布功能已禁用")
+
+        # 所有发布者就绪之后，最后才建立订阅（原因见上面的顺序说明）
+        self.create_subscription(
+            SemanticObjectArray,
+            gp("objects_topic").value,
+            self._on_objects,
+            10,
+        )
 
         self.srv = self.create_service(
             QuerySemanticMap, gp("query_service").value, self._on_query
