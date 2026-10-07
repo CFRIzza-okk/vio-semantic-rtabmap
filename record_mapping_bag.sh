@@ -6,12 +6,15 @@
 #   ./record_mapping_bag.sh
 #   ./record_mapping_bag.sh --name=消防走廊
 #   ./record_mapping_bag.sh --fast
+#   ./record_mapping_bag.sh --no-monitor
 #
 # 录制期间：
 #   1. 脚本启动 launch_showcase.sh --no-rviz；
-#   2. 携带相机走完整路线；
-#   3. 回到起点后在本终端按 Ctrl+C；
-#   4. rosbag 保存到 ~/VIO/data/bags/。
+#   2. 脚本同时启动 VIO 发散监测，一旦视觉里程计持续失效就直接在本终端
+#      打印 “VIO发散”，避免录完才发现 bag 里的 /odom 全程无效；
+#   3. 携带相机走完整路线；
+#   4. 回到起点后在本终端按 Ctrl+C；
+#   5. rosbag 保存到 ~/VIO/data/bags/。
 #
 # 录制内容用于之后离线重建 RTAB-Map 地图，不依赖外网。
 # ============================================================================
@@ -24,12 +27,14 @@ BAG_DIR="$VIO_DIR/data/bags"
 SHOWCASE="$VIO_DIR/launch_showcase.sh"
 NAME="mapping_$(date +%Y%m%d_%H%M%S)"
 FAST=false
+MONITOR=true
 
 for arg in "$@"; do
   case "$arg" in
     --name=*) NAME="${arg#--name=}" ;;
     --fast) FAST=true ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --no-monitor) MONITOR=false ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "错误：未知参数 $arg（使用 --help 查看用法）" >&2; exit 2 ;;
   esac
 done
@@ -43,8 +48,10 @@ mkdir -p "$BAG_DIR"
 
 LAUNCH_PID=""
 BAG_PID=""
+MON_PID=""
 CLEANED=false
 BAG_PATH="$BAG_DIR/$NAME"
+MONITOR_PY="$VIO_DIR/tools/vio_divergence_monitor.py"
 
 cleanup() {
   [ "$CLEANED" = true ] && return
@@ -68,6 +75,15 @@ cleanup() {
       kill -TERM -- "-$BAG_PID" 2>/dev/null || true
       sleep 10
     fi
+  fi
+
+  # 先停监测，避免相机和 RTAB-Map 被关闭时误报 “VIO无数据”。
+  if [ -n "$MON_PID" ]; then
+    kill -INT -- "-$MON_PID" 2>/dev/null || true
+    sleep 2
+    kill -KILL -- "-$MON_PID" 2>/dev/null || true
+    wait "$MON_PID" 2>/dev/null || true
+    MON_PID=""
   fi
 
   # rosbag 完成写盘后再停止相机和建图节点。
@@ -149,6 +165,18 @@ if ! kill -0 "$BAG_PID" 2>/dev/null; then
   exit 1
 fi
 
+# VIO 发散监测：输出直接留在本终端，方便边走边看状态。
+# 日志另外留一份，便于录制结束后复查。
+if [ "$MONITOR" = true ]; then
+  if [ -f "$MONITOR_PY" ]; then
+    setsid python3 -u "$MONITOR_PY" \
+      --log "$BAG_DIR/${NAME}_vio_monitor.log" &
+    MON_PID=$!
+  else
+    echo "[警告] 找不到 $MONITOR_PY，跳过 VIO 发散监测。" >&2
+  fi
+fi
+
 cat <<EOF
 
 ============================================================
@@ -156,8 +184,10 @@ cat <<EOF
 ============================================================
   路径：$BAG_PATH
   日志：$BAG_DIR/${NAME}_record.log
+  监测：$BAG_DIR/${NAME}_vio_monitor.log
 
   现在携带相机完成一圈，结束后在本终端按 Ctrl+C。
+  监测会在视觉里程计持续失效时直接提示 “VIO发散”。
 ============================================================
 EOF
 

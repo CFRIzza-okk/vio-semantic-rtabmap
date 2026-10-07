@@ -104,7 +104,31 @@ cd ~/VIO
 
 录制脚本会启动手持模式，保存彩色图像、对齐深度图、相机内参、`/odom` 和静态 TF 到 `~/VIO/data/bags/`。回放时由 RTAB-Map 重新计算地图坐标系，避免录入旧的动态 TF。完成一圈后在录制终端按 Ctrl-C，等待脚本提示 rosbag 已保存。
 
-回到本机后，不启动 RealSense 和实时视觉里程计，直接回放：
+### 录制期间的 VIO 发散监测
+
+录制脚本会同时启动视觉里程计监测，输出直接显示在录制终端里。一旦视觉里程计持续失效，终端会立即打印：
+
+```text
+⚠️  VIO发散
+```
+
+默认判定条件是「连续 3 秒没有有效位姿」且「累计 10 个坏帧」，两者同时满足才算发散，避免快速转身或短暂丢帧造成误报。发散恢复后会打印 `VIO已恢复`，录制结束时会打印统计汇总，包括收到帧数、坏帧数、发散次数和累计里程。
+
+出现 `VIO发散` 时应当放慢移动、把相机移回有纹理的区域；若整段录制持续发散，该 rosbag 中的 `/odom` 会全程是无效零位姿，无法用于离线建图。监测日志同时保存在 `~/VIO/data/bags/<名称>_vio_monitor.log`。
+
+不需要监测时：
+
+```bash
+./record_mapping_bag.sh --name=消防走廊 --no-monitor
+```
+
+也可以单独运行监测节点调整灵敏度：
+
+```bash
+python3 ~/VIO/tools/vio_divergence_monitor.py --grace 20 --sustain 3 --min-bad-frames 10
+```
+
+回到本机后，不启动 RealSense，直接回放：
 
 ```bash
 cd ~/VIO
@@ -118,7 +142,7 @@ cd ~/VIO
 ./replay_mapping_bag.sh ~/VIO/data/bags/消防走廊 --rate=0.5
 ```
 
-回放脚本使用 rosbag 中的图像、深度、相机内参和静态 TF，在本机重新运行 RGB-D 视觉里程计，再由 RTAB-Map 重建地图；每次回放默认生成新的数据库。录制和回放时不要同时运行另一套 RealSense、RTAB-Map 或 rosbag 进程。
+回放脚本使用 rosbag 中的图像、深度、相机内参、录制时的 `/odom` 和静态 TF，由 RTAB-Map 重建地图；每次回放默认生成新的数据库。回放时使用 rosbag 的时钟，不回放旧的动态 `/tf`。录制和回放时不要同时运行另一套 RealSense、RTAB-Map 或 rosbag 进程。
 
 ## PX4 飞行器模式：启动 MAVROS
 
