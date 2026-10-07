@@ -7,8 +7,8 @@
 #   ./replay_mapping_bag.sh data/bags/mapping_20260101_120000 --no-rviz
 #   ./replay_mapping_bag.sh data/bags/mapping_20260101_120000 --rate=0.5
 #
-# 注意：回放时不启动 RealSense，也不启动实时视觉里程计；相机图像、深度、
-# 内参、/odom 和 /tf_static 全部来自 rosbag。RTAB-Map 使用 /odom 重建地图。
+# 注意：回放时不启动 RealSense 和实时视觉里程计；相机图像、深度、内参、
+# 录制时的 /odom 和 /tf_static 全部来自 rosbag，RTAB-Map 使用录制的 /odom 重建地图。
 # ============================================================================
 
 set -Ee
@@ -82,11 +82,13 @@ else
   RVIZ_ARGS=(rviz:=false)
 fi
 
-# RTAB-Map 使用回放的 /odom；不启动 visual_odometry，避免与 rosbag 中的 odom 冲突。
+LOG="$VIO_DIR/data/replay_rtabmap_$(date +%Y%m%d_%H%M%S).log"
+# RTAB-Map 使用录制时的 /odom；不重新运行 visual_odometry，避免离线
+# 再次受到白墙、帧率变化或图像同步差异影响。
 setsid ros2 launch rtabmap_launch rtabmap.launch.py \
   visual_odometry:=false \
   icp_odometry:=false \
-  use_sim_time:=true \
+  use_sim_time:=false \
   odom_topic:=/odom \
   publish_tf_odom:=false \
   publish_tf_map:=true \
@@ -94,20 +96,25 @@ setsid ros2 launch rtabmap_launch rtabmap.launch.py \
   subscribe_depth:=true \
   subscribe_rgbd:=false \
   approx_sync:=true \
+  approx_sync_max_interval:=0.20 \
+  odom_sensor_sync:=true \
+  queue_size:=100 \
+  qos_image:=1 \
+  qos_camera_info:=1 \
+  qos_odom:=1 \
   rgb_topic:=/camera/camera/color/image_raw \
   depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
   camera_info_topic:=/camera/camera/color/camera_info \
   rtabmap_viz:=false \
   "${RVIZ_ARGS[@]}" \
   "database_path:=$DB_PATH" \
-  >"$VIO_DIR/data/replay_rtabmap_$(date +%Y%m%d_%H%M%S).log" 2>&1 &
+  >"$LOG" 2>&1 &
 PIDS+=("$!")
 
 sleep 8
 
 echo "[回放] $BAG"
-# 只回放离线建图需要的输入，排除录制时的动态 /tf，避免旧 TF
-# 与回放期间 RTAB-Map 重新发布的 map/odom 变换冲突。
+# 回放图像、深度、相机内参、录制时的 /odom 和静态 TF；排除旧动态 /tf。
 setsid ros2 bag play "$BAG" --clock --rate "$RATE" \
   --topics \
   /camera/camera/color/image_raw \

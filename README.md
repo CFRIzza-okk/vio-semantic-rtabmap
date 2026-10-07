@@ -118,7 +118,7 @@ cd ~/VIO
 ./replay_mapping_bag.sh ~/VIO/data/bags/消防走廊 --rate=0.5
 ```
 
-回放脚本使用 rosbag 中的图像、深度、相机内参、`/odom` 和 TF，由 RTAB-Map 重建地图；每次回放默认生成新的数据库。录制和回放时不要同时运行另一套 RealSense、RTAB-Map 或 rosbag 进程。
+回放脚本使用 rosbag 中的图像、深度、相机内参和静态 TF，在本机重新运行 RGB-D 视觉里程计，再由 RTAB-Map 重建地图；每次回放默认生成新的数据库。录制和回放时不要同时运行另一套 RealSense、RTAB-Map 或 rosbag 进程。
 
 ## PX4 飞行器模式：启动 MAVROS
 
