@@ -51,22 +51,48 @@ cleanup() {
   CLEANED=true
   echo ""
   echo "[停止] 正在停止 rosbag 和实时建图..."
+
+  # rosbag 可能正在把缓存写入 SQLite 并执行 zstd 压缩；不能固定几秒后
+  # KILL，否则数据库虽然很大，但 metadata.yaml 还没生成，无法回放。
   if [ -n "$BAG_PID" ]; then
     kill -INT -- "-$BAG_PID" 2>/dev/null || true
-    sleep 3
-    kill -TERM -- "-$BAG_PID" 2>/dev/null || true
+    echo "[等待] rosbag 正在写盘和压缩，可能需要几分钟..."
+    for _ in $(seq 1 600); do
+      if ! kill -0 "$BAG_PID" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "$BAG_PID" 2>/dev/null; then
+      echo "[警告] rosbag 仍未退出，发送 TERM。" >&2
+      kill -TERM -- "-$BAG_PID" 2>/dev/null || true
+      sleep 10
+    fi
   fi
+
+  # rosbag 完成写盘后再停止相机和建图节点。
   if [ -n "$LAUNCH_PID" ]; then
     kill -INT -- "-$LAUNCH_PID" 2>/dev/null || true
-    sleep 5
-    kill -TERM -- "-$LAUNCH_PID" 2>/dev/null || true
+    sleep 8
+    if kill -0 "$LAUNCH_PID" 2>/dev/null; then
+      kill -TERM -- "-$LAUNCH_PID" 2>/dev/null || true
+      sleep 3
+    fi
   fi
-  sleep 2
   if [ -n "$BAG_PID" ]; then kill -KILL -- "-$BAG_PID" 2>/dev/null || true; fi
   if [ -n "$LAUNCH_PID" ]; then kill -KILL -- "-$LAUNCH_PID" 2>/dev/null || true; fi
   wait "$BAG_PID" 2>/dev/null || true
   wait "$LAUNCH_PID" 2>/dev/null || true
-  echo "[完成] rosbag：$BAG_PATH"
+
+  if [ ! -f "$BAG_PATH/metadata.yaml" ]; then
+    echo "[恢复] metadata.yaml 未生成，尝试重建 rosbag 索引..."
+    ros2 bag reindex "$BAG_PATH" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$BAG_PATH/metadata.yaml" ]; then
+    echo "[完成] rosbag：$BAG_PATH"
+  else
+    echo "[错误] rosbag 未生成 metadata.yaml：$BAG_PATH" >&2
+  fi
 }
 trap cleanup INT TERM EXIT
 

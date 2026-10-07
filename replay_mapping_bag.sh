@@ -106,7 +106,16 @@ PIDS+=("$!")
 sleep 8
 
 echo "[回放] $BAG"
-setsid ros2 bag play "$BAG" --clock --rate "$RATE" &
+# 只回放离线建图需要的输入，排除录制时的动态 /tf，避免旧 TF
+# 与回放期间 RTAB-Map 重新发布的 map/odom 变换冲突。
+setsid ros2 bag play "$BAG" --clock --rate "$RATE" \
+  --topics \
+  /camera/camera/color/image_raw \
+  /camera/camera/aligned_depth_to_color/image_raw \
+  /camera/camera/color/camera_info \
+  /odom \
+  /tf_static \
+  &
 PIDS+=("$!")
 
 cat <<EOF
