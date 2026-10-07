@@ -95,7 +95,7 @@ wait_topic() {
 
 for topic in /camera/camera/color/image_raw \
              /camera/camera/aligned_depth_to_color/image_raw \
-             /camera/camera/color/camera_info /odom /tf /tf_static; do
+             /camera/camera/color/camera_info /odom /tf_static; do
   if ! wait_topic "$topic" 90; then
     echo "错误：等待话题 $topic 超时。" >&2
     exit 1
@@ -112,7 +112,6 @@ setsid ros2 bag record \
   /camera/camera/aligned_depth_to_color/image_raw \
   /camera/camera/color/camera_info \
   /odom \
-  /tf \
   /tf_static \
   /rtabmap/odom_info \
   >"$BAG_DIR/${NAME}_record.log" 2>&1 &

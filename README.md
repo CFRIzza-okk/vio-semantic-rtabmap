@@ -102,7 +102,7 @@ cd ~/VIO
 ./record_mapping_bag.sh --name=消防走廊
 ```
 
-录制脚本会启动手持模式，保存彩色图像、对齐深度图、相机内参、`/odom` 和 TF 到 `~/VIO/data/bags/`。完成一圈后在录制终端按 Ctrl-C，等待脚本提示 rosbag 已保存。
+录制脚本会启动手持模式，保存彩色图像、对齐深度图、相机内参、`/odom` 和静态 TF 到 `~/VIO/data/bags/`。回放时由 RTAB-Map 重新计算地图坐标系，避免录入旧的动态 TF。完成一圈后在录制终端按 Ctrl-C，等待脚本提示 rosbag 已保存。
 
 回到本机后，不启动 RealSense 和实时视觉里程计，直接回放：
 
