@@ -144,6 +144,43 @@ cd ~/VIO
 
 回放脚本使用 rosbag 中的图像、深度、相机内参、录制时的 `/odom` 和静态 TF，由 RTAB-Map 重建地图；每次回放默认生成新的数据库。回放时使用 rosbag 的时钟，不回放旧的动态 `/tf`。录制和回放时不要同时运行另一套 RealSense、RTAB-Map 或 rosbag 进程。
 
+### 查看 rosbag 和 database
+
+用 `rtabmapviz` 在回放时实时观察：
+
+```bash
+cd ~/VIO
+./replay_mapping_bag.sh ~/VIO/data/bags/消防走廊 --viz --no-rviz
+```
+
+`rtabmapviz` 会显示当前帧、特征点、局部地图和位姿图；不需要 RViz 时可以只开它。
+
+用 RTAB-Map 自带的 database 查看器打开已保存的数据库：
+
+```bash
+source /opt/ros/humble/setup.bash
+rtabmap-databaseViewer ~/.ros/rtabmap_showcase.db
+```
+
+界面上主要看这几项：`Graph View`（位姿图和回环）、`3D Map`（点云/栅格）、`Statistics`（节点数、处理耗时）、以及数据库里的节点和词袋信息。
+
+不开图形界面时，可以用下面两条命令先确认数据库里有没有内容：
+
+```bash
+source /opt/ros/humble/setup.bash
+rtabmap-info ~/.ros/rtabmap_showcase.db
+```
+
+```bash
+python3 -c "
+import sqlite3
+c = sqlite3.connect('file:$HOME/.ros/rtabmap_showcase.db?mode=ro', uri=True)
+print('Node =', c.execute('select count(*) from Node').fetchone()[0])
+"
+```
+
+注意：如果 `Node = 0`，说明这份数据库里没有任何关键帧，`databaseViewer` 只会显示空图。视觉里程计发散时录制的 bag 在回放后就会得到这种空库，此时应先按上面的 VIO 监测提示重新录制，而不是反复回放。
+
 ## PX4 飞行器模式：启动 MAVROS
 
 本项目采用 PX4 飞控，使用 CUAV Pixhawk v6X V2（USB ID `3163:004c`），连接设备名为 `/dev/ttyACM0`。

@@ -6,9 +6,11 @@
 #   ./replay_mapping_bag.sh data/bags/mapping_20260101_120000
 #   ./replay_mapping_bag.sh data/bags/mapping_20260101_120000 --no-rviz
 #   ./replay_mapping_bag.sh data/bags/mapping_20260101_120000 --rate=0.5
+#   ./replay_mapping_bag.sh data/bags/mapping_20260101_120000 --viz
 #
 # 注意：回放时不启动 RealSense 和实时视觉里程计；相机图像、深度、内参、
 # 录制时的 /odom 和 /tf_static 全部来自 rosbag，RTAB-Map 使用录制的 /odom 重建地图。
+# --viz 会额外打开 RTAB-Map 自带的 rtabmapviz 界面。
 # ============================================================================
 
 set -Ee
@@ -18,11 +20,12 @@ VIO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SEMANTIC_WS="$VIO_DIR/semantic_ws"
 BAG=""
 USE_RVIZ=true
+USE_VIZ=false
 RATE="1.0"
 DB_PATH=""
 
 if [ $# -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-  sed -n '2,15p' "$0"
+  sed -n '2,14p' "$0"
   exit 0
 fi
 BAG="$1"
@@ -30,9 +33,10 @@ shift
 for arg in "$@"; do
   case "$arg" in
     --no-rviz) USE_RVIZ=false ;;
+    --viz) USE_VIZ=true ;;
     --rate=*) RATE="${arg#--rate=}" ;;
     --db=*) DB_PATH="${arg#--db=}" ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "错误：未知参数 $arg" >&2; exit 2 ;;
   esac
 done
@@ -82,6 +86,12 @@ else
   RVIZ_ARGS=(rviz:=false)
 fi
 
+if [ "$USE_VIZ" = true ]; then
+  VIZ_ARGS=(rtabmap_viz:=true)
+else
+  VIZ_ARGS=(rtabmap_viz:=false)
+fi
+
 LOG="$VIO_DIR/data/replay_rtabmap_$(date +%Y%m%d_%H%M%S).log"
 # RTAB-Map 使用录制时的 /odom；不重新运行 visual_odometry，避免离线
 # 再次受到白墙、帧率变化或图像同步差异影响。必须使用 sim time，
@@ -103,7 +113,7 @@ setsid ros2 launch rtabmap_launch rtabmap.launch.py \
   rgb_topic:=/camera/camera/color/image_raw \
   depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
   camera_info_topic:=/camera/camera/color/camera_info \
-  rtabmap_viz:=false \
+  "${VIZ_ARGS[@]}" \
   "${RVIZ_ARGS[@]}" \
   "database_path:=$DB_PATH" \
   >"$LOG" 2>&1 &
@@ -132,6 +142,7 @@ cat <<EOF
   数据库：$DB_PATH
   速率：$RATE
   RViz：$USE_RVIZ
+  rtabmapviz：$USE_VIZ
 
   回放结束后，地图数据库将保存在上述路径。
 ============================================================
