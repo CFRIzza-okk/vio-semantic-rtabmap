@@ -93,6 +93,33 @@ cd ~/VIO
 
 缓慢、平稳移动相机，保持画面有纹理和稳定光照；避免快速旋转、运动模糊、长时间对着白墙或窗户。尽量走闭环并回到起点附近，帮助触发回环检测。D435 在强光、反光、透明物体和远距离区域的深度可能不可靠。若使用 `--fast` 后里程计或地图细节变差，应恢复默认设置。
 
+### 录制 rosbag 后离线建图
+
+如果携带相机离开局域网，可以先录制 RGB-D 数据，回来后在本机离线回放建图：
+
+```bash
+cd ~/VIO
+./record_mapping_bag.sh --name=消防走廊
+```
+
+录制脚本会启动手持模式，保存彩色图像、对齐深度图、相机内参、`/odom` 和 TF 到 `~/VIO/data/bags/`。完成一圈后在录制终端按 Ctrl-C，等待脚本提示 rosbag 已保存。
+
+回到本机后，不启动 RealSense 和实时视觉里程计，直接回放：
+
+```bash
+cd ~/VIO
+./replay_mapping_bag.sh ~/VIO/data/bags/消防走廊
+```
+
+不启动本机 RViz 或降低回放速度：
+
+```bash
+./replay_mapping_bag.sh ~/VIO/data/bags/消防走廊 --no-rviz
+./replay_mapping_bag.sh ~/VIO/data/bags/消防走廊 --rate=0.5
+```
+
+回放脚本使用 rosbag 中的图像、深度、相机内参、`/odom` 和 TF，由 RTAB-Map 重建地图；每次回放默认生成新的数据库。录制和回放时不要同时运行另一套 RealSense、RTAB-Map 或 rosbag 进程。
+
 ## PX4 飞行器模式：启动 MAVROS
 
 本项目采用 PX4 飞控，使用 CUAV Pixhawk v6X V2（USB ID `3163:004c`），连接设备名为 `/dev/ttyACM0`。
