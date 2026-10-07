@@ -180,6 +180,41 @@ print('Node =', c.execute('select count(*) from Node').fetchone()[0])
 
 Note: if `Node = 0`, the database contains no keyframes and `databaseViewer` will only show an empty graph. A bag recorded while visual odometry was diverged replays into exactly such an empty database; re-record following the VIO monitor hints above instead of replaying it repeatedly.
 
+### Inventorying and Rescuing Older Databases
+
+RTAB-Map databases end up scattered across `~/.ros/`, backup directories, and automatic `rtabmap_*.db.bak.*` backups. Note that **`ls ~/.ros/*.db` does not match `.db.bak.*`**, which makes it easy to conclude wrongly that there is no data. List everything with:
+
+```bash
+cd ~/VIO
+python3 tools/scan_rtabmap_dbs.py
+```
+
+For each database it reports size, node count, trajectory extent, travelled distance, closures, landmarks, whether `Data`/`Feature` are intact, and SQLite integrity, then prints ready-to-run `rtabmap-databaseViewer` commands.
+
+If a database was copied with `cp`/`rsync` while mapping was still running, it becomes `database disk image is malformed` and `databaseViewer` crashes on it. Usually only the large `Data`/`Feature`/`Statistics` tables are damaged while `Node` (poses), `Link` (closures and landmarks), and `Word` (bag of words) survive. Move the readable tables into a fresh database:
+
+```bash
+python3 tools/recover_rtabmap_db.py damaged.db recovered.db
+```
+
+A recovered database still shows trajectories, closures, and landmarks, but has **no per-node images and no 3D point cloud** (that data lived in the damaged tables).
+
+You can also export trajectories, closures, and semantic landmarks and plot them without any GUI:
+
+```bash
+python3 tools/export_rtabmap_map.py ~/.ros/rtabmap_showcase.db.bak.20261007_193738 \
+  --out trajectory.png --csv trajectory.csv
+```
+
+The output figure contains the top-down trajectory coloured by time with closure lines, height over time, semantic landmark positions, and a statistics panel. Landmark positions are computed as `world = R_node * t_landmark + t_node`; landmarks whose multi-observation spread exceeds `--landmark-max-spread` (default 0.25 m) are marked as unreliable.
+
+Database contents can also be read straight from the command line:
+
+```bash
+source /opt/ros/humble/setup.bash
+rtabmap-info ~/.ros/rtabmap_showcase.db.bak.20261007_193738
+```
+
 ## PX4 Mode: Start MAVROS
 
 This project uses a PX4 flight controller, specifically a CUAV Pixhawk v6X V2 (USB ID `3163:004c`) connected as `/dev/ttyACM0`.

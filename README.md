@@ -181,6 +181,41 @@ print('Node =', c.execute('select count(*) from Node').fetchone()[0])
 
 注意：如果 `Node = 0`，说明这份数据库里没有任何关键帧，`databaseViewer` 只会显示空图。视觉里程计发散时录制的 bag 在回放后就会得到这种空库，此时应先按上面的 VIO 监测提示重新录制，而不是反复回放。
 
+### 盘点与抢救历史数据库
+
+RTAB-Map 的数据库会散落在 `~/.ros/`、备份目录，以及 `rtabmap_*.db.bak.*` 这类自动备份里。注意 **`ls ~/.ros/*.db` 匹配不到 `.db.bak.*`**，很容易误判成“没有数据”。用盘点工具一次列全：
+
+```bash
+cd ~/VIO
+python3 tools/scan_rtabmap_dbs.py
+```
+
+它会逐个检查大小、节点数、轨迹范围、里程、回环数、地标数、`Data`/`Feature` 是否完好，以及 SQLite 完整性，并给出可直接运行的 `rtabmap-databaseViewer` 命令。
+
+数据库如果在建图还没结束时被 `cp`/`rsync`，会出现 `database disk image is malformed`，`databaseViewer` 会直接崩掉。通常只有 `Data`/`Feature`/`Statistics` 这几张大表损坏，而 `Node`（位姿）、`Link`（回环与地标）、`Word`（词袋）仍然完好。用恢复工具把可读的表搬到一个新库：
+
+```bash
+python3 tools/recover_rtabmap_db.py 损坏的.db 恢复后的.db
+```
+
+恢复后的库能看轨迹、回环和地标，但**没有节点图像和 3D 点云**（那部分数据在损坏的表里）。
+
+不用打开图形界面也可以导出轨迹、回环和语义地标并画图：
+
+```bash
+python3 tools/export_rtabmap_map.py ~/.ros/rtabmap_showcase.db.bak.20261007_193738 \
+  --out 轨迹.png --csv 轨迹.csv
+```
+
+输出的图包含俯视轨迹（按时间着色，叠加回环连线）、高度随时间变化、语义地标位置和统计信息。地标位置按 `世界坐标 = R_node × t_landmark + t_node` 计算；同一地标的多帧观测离散度超过 `--landmark-max-spread`（默认 0.25 m）的会被标为不可信。
+
+还可以直接用命令行读取数据库内容：
+
+```bash
+source /opt/ros/humble/setup.bash
+rtabmap-info ~/.ros/rtabmap_showcase.db.bak.20261007_193738
+```
+
 ## PX4 飞行器模式：启动 MAVROS
 
 本项目采用 PX4 飞控，使用 CUAV Pixhawk v6X V2（USB ID `3163:004c`），连接设备名为 `/dev/ttyACM0`。
