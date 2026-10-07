@@ -84,11 +84,12 @@ fi
 
 LOG="$VIO_DIR/data/replay_rtabmap_$(date +%Y%m%d_%H%M%S).log"
 # RTAB-Map 使用录制时的 /odom；不重新运行 visual_odometry，避免离线
-# 再次受到白墙、帧率变化或图像同步差异影响。
+# 再次受到白墙、帧率变化或图像同步差异影响。必须使用 sim time，
+# 因为 rosbag 中的消息时间戳来自录制时的 ROS 时钟。
 setsid ros2 launch rtabmap_launch rtabmap.launch.py \
   visual_odometry:=false \
   icp_odometry:=false \
-  use_sim_time:=false \
+  use_sim_time:=true \
   odom_topic:=/odom \
   publish_tf_odom:=false \
   publish_tf_map:=true \
@@ -97,11 +98,8 @@ setsid ros2 launch rtabmap_launch rtabmap.launch.py \
   subscribe_rgbd:=false \
   approx_sync:=true \
   approx_sync_max_interval:=0.20 \
-  odom_sensor_sync:=true \
+  odom_sensor_sync:=false \
   queue_size:=100 \
-  qos_image:=1 \
-  qos_camera_info:=1 \
-  qos_odom:=1 \
   rgb_topic:=/camera/camera/color/image_raw \
   depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
   camera_info_topic:=/camera/camera/color/camera_info \
