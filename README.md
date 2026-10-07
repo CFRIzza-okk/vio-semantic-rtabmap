@@ -1,21 +1,21 @@
-# Jetson D435 + RTAB-Map（原生 ROS 2 Humble）
+# Vio-Semantic-RTABMAP
+
+[English README](README_EN.md)
 
 基于 RTAB-Map 的实时视觉里程计、三维建图与语义标注系统：D435 同步采集彩色图像和对齐深度图，RTAB-Map 从 RGB-D 数据估计相机运动、生成地图并通过回环降低漂移；语义检测节点使用 YOLO 识别目标，再结合目标框内的有效深度将二维检测反投影为相机坐标系下的三维地标，语义地图节点通过多帧关联与置信度筛选形成稳定目标并发布标记。
 
 
-运行环境为 Ubuntu 22.04、Jetson ARM64 和 ROS 2 Humble，采用原生 ROS 2 部署，不使用根目录旧 Docker 配置。
-
 ## 运行模式
 
-本项目有两种运行模式（PX4 模式和手持展示模式），按使用场景选择，**不要同时启动**：
+本项目有两种运行模式（PX4 模式和手持模式），按使用场景选择，**不要同时启动**：
 
 | 场景 | 启动命令 | 里程计来源 | 展示 |
 |---|---|---|---|
-| PX4 飞行器 | `~/VIO/launch_px4_mavros.sh` 后运行 `~/VIO/launch_d435_rtabmap.sh` | MAVROS `/mavros/local_position/odom` | RViz |
-| 手持 D435 参观展示 | `cd ~/VIO && ./launch_showcase.sh` | RTAB-Map RGB-D 视觉里程计 | RViz |
+| PX4  | `~/VIO/launch_px4_mavros.sh` 后运行 `~/VIO/launch_d435_rtabmap.sh` | MAVROS `/mavros/local_position/odom` | RViz |
+| 手持 D435  | `cd ~/VIO && ./launch_showcase.sh` | RTAB-Map RGB-D 视觉里程计 | RViz |
 | 手持建图 + 远程 Foxglove | `cd ~/VIO && ./launch_showcase.sh --no-rviz`，另开终端运行 `./start_foxglove.sh` | RTAB-Map RGB-D 视觉里程计 | 另一台电脑上的 Foxglove |
 
-手持展示使用 D435 的 RGB-D 视觉里程计，不依赖 PX4/MAVROS。PX4 模式使用飞控里程计；这两种模式的里程计来源和 TF 发布方式不同，不能混用。切换模式前，先在原终端按 Ctrl-C 退出上一套流程，避免重复启动相机或 RTAB-Map 节点。
+手持展示使用 D435 的 RGB-D 视觉里程计；PX4 模式使用飞控里程计。这两种模式的里程计来源和 TF 发布方式不同，不能混用。切换模式前，先在原终端按 Ctrl-C 退出上一套流程，避免重复启动相机或 RTAB-Map 节点。
 
 ## 安装
 
@@ -36,7 +36,7 @@ source /opt/ros/humble/setup.bash
 colcon build --symlink-install --parallel-workers 1
 ```
 
-Foxglove 远程展示需要在 Jetson 安装 bridge（只需安装一次）：
+Foxglove 远程展示需要安装 bridge（只需安装一次）：
 
 ```bash
 sudo apt update
@@ -45,14 +45,12 @@ sudo apt install -y ros-humble-foxglove-bridge
 
 ## 手持 D435 实时建图与语义展示
 
-这是不连接飞控时进行现场展示的推荐方式：
-
 ```bash
 cd ~/VIO
 ./launch_showcase.sh
 ```
 
-脚本依次检查并启动 RealSense D435、相机外参、RTAB-Map RGB-D 视觉里程计与建图、语义检测和语义地图节点，并等待节点和话题就绪后才报告启动完成。默认启动 RViz、创建新的展示数据库，并采用保守的 `uniform` 地标协方差模式；该模式保留原基线行为，质量自适应模式尚未完成 ATE/RPE 对照验证，展示时不要临时启用。默认语义类别过滤为 `chair,bottle,backpack,suitcase,laptop`，排除了会移动的人体，降低动态目标被当作静态地标的风险。
+脚本会依次检查并启动 RealSense D435、相机外参、RTAB-Map RGB-D 视觉里程计与建图、语义检测和语义地图节点，并等待节点和话题就绪后才报告启动完成。默认启动 RViz、创建新的展示数据库，并采用保守的 `uniform` 地标协方差模式；默认语义类别为 `chair,bottle,backpack,suitcase,laptop`，排除了会移动的人体，降低动态目标被当作静态地标的风险。
 
 常用参数：
 
@@ -64,18 +62,18 @@ cd ~/VIO
 ./launch_showcase.sh --classes=chair,bottle  # 自定义 COCO 类别白名单
 ```
 
-默认数据库位于 `~/.ros/rtabmap_showcase.db`，语义地图位于 `~/VIO/data/showcase_semantic_map.json`，日志位于 `~/VIO/data/showcase_logs/`。默认启动会将已有展示数据库和语义地图备份后从零开始，避免不同场次的地图数据混合。退出时在启动终端按 Ctrl-C，让节点有机会保存数据库和语义地图；不要直接使用 `kill -9`。
+默认数据库位于 `~/.ros/rtabmap_showcase.db`，语义地图位于 `~/VIO/data/showcase_semantic_map.json`，日志位于 `~/VIO/data/showcase_logs/`。默认启动会将已有展示数据库和语义地图备份后从零开始，避免不同场次的地图数据混合。退出时在启动终端按 Ctrl-C，节点将保存数据库和语义地图。
 
 ### 使用 Foxglove 远程显示
 
-在 Jetson 的建图终端运行：
+在 终端运行：
 
 ```bash
 cd ~/VIO
 ./launch_showcase.sh --no-rviz
 ```
 
-另开 Jetson 终端启动 Foxglove Bridge：
+另开 终端启动 Foxglove Bridge：
 
 ```bash
 cd ~/VIO
@@ -91,13 +89,14 @@ cd ~/VIO
 
 要显示语义标注，再添加 `/semantics/map_markers`、`/semantics/label_markers` 和 `/semantics/markers`。只想看原始建图时，不添加或隐藏这些语义话题。Foxglove 不支持 RViz 的 RTAB-Map 专用插件（如 MapCloud/MapGraph）；全局点云应使用标准消息话题 `/rtabmap/cloud_map`。按 Ctrl-C 分别停止 Bridge 和建图脚本。
 
-### 展示时的采集建议
+### 图像采集建议
 
 缓慢、平稳移动相机，保持画面有纹理和稳定光照；避免快速旋转、运动模糊、长时间对着白墙或窗户。尽量走闭环并回到起点附近，帮助触发回环检测。D435 在强光、反光、透明物体和远距离区域的深度可能不可靠。若使用 `--fast` 后里程计或地图细节变差，应恢复默认设置。
 
 ## PX4 飞行器模式：启动 MAVROS
 
-本项目采用 PX4 飞控，曾使用 CUAV Pixhawk v6X V2（USB ID `3163:004c`），连接设备名为 `/dev/ttyACM0`。飞控型号、端口和波特率会随实际硬件变化，应按现场设备修改对应的 MAVROS 配置。每次只启动一个 MAVROS 实例：
+本项目采用 PX4 飞控，使用 CUAV Pixhawk v6X V2（USB ID `3163:004c`），连接设备名为 `/dev/ttyACM0`。
+启动 MAVROS ：
 
 ```bash
 ~/VIO/launch_px4_mavros.sh
@@ -138,7 +137,7 @@ map ──(MAVROS local_position.tf.send:=true)──> base_link
 ```
 
 - MAVROS 发布 `map`→`base_link` 动态变换；
-- RTAB-Map 使用飞控提供的 `/mavros/local_position/odom`，并设置 `publish_tf_map:=false`，避免竞争发布 `map` TF；
+- RTAB-Map 使用飞控提供的 `/mavros/local_position/odom`，并设置 `publish_tf_map:=false`，避免同时发布 `map` TF；
 - 启动脚本发布 `base_link`→`camera_link`，RealSense 驱动发布相机内部 TF。
 
 不要给 `rtabmap.launch.py` 传入 `odom_frame_id:=map`。它不是选择里程计来源的参数；错误设置会导致 RTAB-Map 尝试发布 `map`→`map` 自变换，tf2 以 `TF_SELF_TRANSFORM` 拒绝，RViz 中相关显示会因缺少 TF 而报错。
@@ -150,7 +149,6 @@ ros2 run tf2_ros tf2_echo map base_link
 ros2 run tf2_ros tf2_echo map camera_color_optical_frame
 ```
 
-两条命令都应能输出变换。手持展示模式下 TF 由 RTAB-Map 的视觉里程计与建图节点提供，不要同时启动 PX4 MAVROS 模式的地图 TF。
 
 ## RViz 布局
 
