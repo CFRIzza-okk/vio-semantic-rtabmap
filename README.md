@@ -102,7 +102,7 @@ Your convention: x right, y forward, z up; the IMU sits 7.5 cm left, 4.5 cm behi
 - `launch_d435_rtabmap.sh`: camera + RTAB-Map + RViz launcher
 - `rtabmap_d435.rviz`: RViz layout used by the launcher (`rviz_cfg`)
 - `launch_px4_mavros.sh`, `px4_tf.launch.xml`, `px4_tf_config.yaml`: MAVROS launcher and the TF-enabling parameter override
-- `docker-compose.yml`, `Dockerfile`: old container artifacts; not needed for the native deployment
+- Deployment is native ROS 2 Humble; obsolete root-level container configuration has been removed.
 
 ## References
 
