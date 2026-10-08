@@ -257,6 +257,22 @@ if [ "$FAST" = true ]; then
 else
   ODOM_ARGS="--Vis/MaxFeatures 800"
 fi
+# 【关键】连续丢失后自动重置里程计，让它有机会重新初始化。
+#
+# 为什么必须加（实测，别删）：
+#   Odom/ResetCountdown 默认为 0 = 禁用。这意味着视觉里程计一旦跟丢一次，
+#   就【永久死亡】——不会自己重来。实测日志：
+#     18:04:37  最后一次成功 quality=40（一切正常）
+#     18:04:37  紧接着 "Not enough inliers 0/20 (matches=76)" → quality=0
+#     之后       永远 quality=0，RTAB-Map 一直报 "no odometry is provided.
+#               Image 0 is ignored!"，地图从那一刻起再也不更新
+#   整个会话 971 次成功 / 943 次失败，失败全部集中在跟丢之后。
+#
+#   设为 30 表示连续 30 帧配准失败就重置并重新初始化。代价是重置瞬间位姿
+#   会跳一下（RTAB-Map 会把它当作一次里程计重定位处理），但比永久卡死好得多。
+#   注意：跟丢本身才是根因（运动过快/模糊/纹理不足/帧率被饿低），
+#   这个参数是【恢复机制】，不是防止跟丢。
+ODOM_ARGS="$ODOM_ARGS --Odom/ResetCountdown 30"
 
 if [ "$ODOM_MODE" = "vo" ]; then
   # 视觉里程计：rtabmap.launch.py 内部直接起 rgbd_odometry

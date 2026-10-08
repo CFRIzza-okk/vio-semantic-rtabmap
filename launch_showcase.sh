@@ -248,6 +248,13 @@ if [ "$FAST" = true ]; then
 else
   ODOM_ARGS="--Vis/MaxFeatures 800"
 fi
+# 【关键】连续丢失后自动重置里程计，让它有机会重新初始化。
+# Odom/ResetCountdown 默认 0 = 禁用，意味着视觉里程计一旦跟丢就【永久死亡】。
+# 实测：18:04:37 最后一次成功 quality=40，紧接着 "Not enough inliers 0/20"
+# 之后永远 quality=0，RTAB-Map 一直丢弃帧，地图再也不更新（971 成功/943 失败）。
+# 设为 30 = 连续 30 帧失败就重置。代价是重置瞬间位姿会跳一下，
+# 但比永久卡死好得多。注意跟丢本身才是根因，这是恢复机制而非预防。
+ODOM_ARGS="$ODOM_ARGS --Odom/ResetCountdown 30"
 
 if [ "$USE_RVIZ" = true ]; then
   RVIZ_ARGS=(rviz:=true "rviz_cfg:=$RVIZ_CONFIG")
