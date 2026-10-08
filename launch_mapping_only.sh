@@ -316,8 +316,21 @@ else
     -p wait_for_transform:=0.2 \
     -p scan_voxel_size:=0.05 \
     -p scan_normal_k:=5 \
+    -p "Icp/MaxTranslation:=0.5" \
+    -p "Icp/MaxRotation:=1.0" \
     -r scan_cloud:=/cloud \
     -r odom:=/icp_odom
+  # ⚠ 实测：Icp/MaxTranslation 的默认值是 0.2 m，在 2.4 Hz 稀疏点云下
+  #   【偏紧到不可用】。实测日志反复出现：
+  #     "libpointmatcher has failed: limit out of bounds: tr: 0.205918/0.2"
+  #     "Cannot compute transform (ICP correction too large -> 0.217790 m ...)"
+  #   即每帧需要约 0.206 m 修正、限幅 0.2 m，只差 3% 就被判为修正量过大，
+  #   于是永久卡死：ICP 输出协方差全 9999 的【失效里程计】→ RTAB-Map 报
+  #     "no odometry is provided. Image 0 is ignored!" → 建不出任何地图。
+  #   放宽到 0.5 m 后留出余量。JSON 输入的 scan 帧率低，这一步是必要的。
+  #
+  # ⚠ 但放宽限幅只是【解除卡死】，不等于 ICP 精度够用。仍未与 VO 做
+  #   ATE/RPE 对照。做正式展示请优先用默认的 --odom=vo（已实测可建出图）。
   wait_node /icp_odometry 45
   wait_topic /icp_odom 60
 
