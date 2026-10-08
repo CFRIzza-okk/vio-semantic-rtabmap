@@ -5,8 +5,12 @@
 # 用法：
 #   ./record_mapping_bag.sh
 #   ./record_mapping_bag.sh --name=消防走廊
+#   ./record_mapping_bag.sh --name=消防走廊 --overwrite
 #   ./record_mapping_bag.sh --fast
 #   ./record_mapping_bag.sh --no-monitor
+#
+# 注意：名称对应的目录已存在时会直接报错退出（ros2 bag record 不会写入
+# 已存在的目录），要覆盖请显式加 --overwrite。
 #
 # 录制期间：
 #   1. 脚本启动 launch_showcase.sh --no-rviz；
@@ -28,13 +32,15 @@ SHOWCASE="$VIO_DIR/launch_showcase.sh"
 NAME="mapping_$(date +%Y%m%d_%H%M%S)"
 FAST=false
 MONITOR=true
+OVERWRITE=false
 
 for arg in "$@"; do
   case "$arg" in
     --name=*) NAME="${arg#--name=}" ;;
     --fast) FAST=true ;;
     --no-monitor) MONITOR=false ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --overwrite) OVERWRITE=true ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "错误：未知参数 $arg（使用 --help 查看用法）" >&2; exit 2 ;;
   esac
 done
@@ -50,8 +56,32 @@ LAUNCH_PID=""
 BAG_PID=""
 MON_PID=""
 CLEANED=false
+BAG_STARTED=false
 BAG_PATH="$BAG_DIR/$NAME"
 MONITOR_PY="$VIO_DIR/tools/vio_divergence_monitor.py"
+
+# ros2 bag record 不会写入已存在的目录，会直接报
+# "Output folder ... already exists"。必须在启动相机之前就拦住，
+# 否则白白启动一整套节点，还容易让人以为已经录上了。
+if [ -e "$BAG_PATH" ]; then
+  if [ "$OVERWRITE" = true ]; then
+    echo "[覆盖] 删除已存在的 rosbag：$BAG_PATH"
+    rm -rf "$BAG_PATH"
+  else
+    echo "错误：$BAG_PATH 已存在，ros2 bag record 不会写入已存在的目录。" >&2
+    echo "" >&2
+    if [ -f "$BAG_PATH/metadata.yaml" ]; then
+      echo "  已有 rosbag：$(du -sh "$BAG_PATH" 2>/dev/null | cut -f1)" >&2
+      ros2 bag info "$BAG_PATH" 2>/dev/null | grep -E 'Duration|Messages|Bag size' | sed 's/^/    /' >&2
+    else
+      echo "  该目录不是完整的 rosbag（可能缺少 metadata.yaml）。" >&2
+    fi
+    echo "" >&2
+    echo "  换一个名称：$0 --name=${NAME}2" >&2
+    echo "  或覆盖它：  $0 --name=$NAME --overwrite" >&2
+    exit 1
+  fi
+fi
 
 cleanup() {
   [ "$CLEANED" = true ] && return
@@ -61,7 +91,8 @@ cleanup() {
 
   # rosbag 可能正在把缓存写入 SQLite 并执行 zstd 压缩；不能固定几秒后
   # KILL，否则数据库虽然很大，但 metadata.yaml 还没生成，无法回放。
-  if [ -n "$BAG_PID" ]; then
+  # 只有在 rosbag 真的启动成功时才等待，否则会打印误导性的“正在写盘”。
+  if [ -n "$BAG_PID" ] && [ "$BAG_STARTED" = true ]; then
     kill -INT -- "-$BAG_PID" 2>/dev/null || true
     echo "[等待] rosbag 正在写盘和压缩，可能需要几分钟..."
     for _ in $(seq 1 600); do
@@ -75,6 +106,8 @@ cleanup() {
       kill -TERM -- "-$BAG_PID" 2>/dev/null || true
       sleep 10
     fi
+  elif [ -n "$BAG_PID" ]; then
+    kill -TERM -- "-$BAG_PID" 2>/dev/null || true
   fi
 
   # 先停监测，避免相机和 RTAB-Map 被关闭时误报 “VIO无数据”。
@@ -99,6 +132,12 @@ cleanup() {
   if [ -n "$LAUNCH_PID" ]; then kill -KILL -- "-$LAUNCH_PID" 2>/dev/null || true; fi
   wait "$BAG_PID" 2>/dev/null || true
   wait "$LAUNCH_PID" 2>/dev/null || true
+
+  if [ "$BAG_STARTED" != true ]; then
+    echo "[未录制] rosbag 没有成功启动，未生成任何数据。"
+    echo "        原因见 $BAG_DIR/${NAME}_record.log"
+    return 0
+  fi
 
   if [ ! -f "$BAG_PATH/metadata.yaml" ]; then
     echo "[恢复] metadata.yaml 未生成，尝试重建 rosbag 索引..."
@@ -161,9 +200,13 @@ BAG_PID=$!
 
 sleep 3
 if ! kill -0 "$BAG_PID" 2>/dev/null; then
-  echo "错误：rosbag 未能启动，请查看 $BAG_DIR/${NAME}_record.log" >&2
+  echo "错误：rosbag 未能启动。" >&2
+  echo "--- $BAG_DIR/${NAME}_record.log ---" >&2
+  tail -n 5 "$BAG_DIR/${NAME}_record.log" 2>/dev/null >&2
+  echo "----------------------------------------" >&2
   exit 1
 fi
+BAG_STARTED=true
 
 # VIO 发散监测：输出直接留在本终端，方便边走边看状态。
 # 日志另外留一份，便于录制结束后复查。

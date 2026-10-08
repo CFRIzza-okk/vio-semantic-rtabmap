@@ -103,6 +103,22 @@ cd ~/VIO
 
 The recording script starts handheld mode and saves color images, aligned depth images, camera calibration, `/odom`, and static TF to `~/VIO/data/bags/`. During replay, RTAB-Map recomputes the map coordinate frame, avoiding the old dynamic TF from the recording session. After completing the route, press Ctrl-C in the recording terminal and wait for the rosbag to be saved.
 
+If a directory with that name already exists, the script exits before starting the camera and reports the existing rosbag:
+
+```text
+错误：/home/jetson/VIO/data/bags/消防走廊 已存在，ros2 bag record 不会写入已存在的目录。
+
+  已有 rosbag：6.7G
+    Bag size:          6.7 GiB
+    Duration:          161.137383678s
+    Messages:          16250
+
+  换一个名称：./record_mapping_bag.sh --name=消防走廊2
+  或覆盖它：  ./record_mapping_bag.sh --name=消防走廊 --overwrite
+```
+
+This comes from `ros2 bag record` itself: when the directory given to `-o` already exists, it reports `Output folder ... already exists` and exits immediately. Replacing existing data requires passing `--overwrite` explicitly; the script never deletes an existing rosbag on its own.
+
 ### VIO Divergence Monitoring While Recording
 
 The recording script also starts a visual-odometry monitor whose output appears directly in the recording terminal. If visual odometry stays invalid, the terminal prints:

@@ -104,6 +104,22 @@ cd ~/VIO
 
 录制脚本会启动手持模式，保存彩色图像、对齐深度图、相机内参、`/odom` 和静态 TF 到 `~/VIO/data/bags/`。回放时由 RTAB-Map 重新计算地图坐标系，避免录入旧的动态 TF。完成一圈后在录制终端按 Ctrl-C，等待脚本提示 rosbag 已保存。
 
+名称对应的目录已存在时，脚本会在启动相机之前直接退出，并列出已有 rosbag 的信息：
+
+```text
+错误：/home/jetson/VIO/data/bags/消防走廊 已存在，ros2 bag record 不会写入已存在的目录。
+
+  已有 rosbag：6.7G
+    Bag size:          6.7 GiB
+    Duration:          161.137383678s
+    Messages:          16250
+
+  换一个名称：./record_mapping_bag.sh --name=消防走廊2
+  或覆盖它：  ./record_mapping_bag.sh --name=消防走廊 --overwrite
+```
+
+这是 `ros2 bag record` 自身的行为：`-o` 指定的目录已存在时会报 `Output folder ... already exists` 并立即退出。要覆盖旧数据必须显式加 `--overwrite`，脚本不会自动删除已有 rosbag。
+
 ### 录制期间的 VIO 发散监测
 
 录制脚本会同时启动视觉里程计监测，输出直接显示在录制终端里。一旦视觉里程计持续失效，终端会立即打印：
