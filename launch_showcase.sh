@@ -25,6 +25,15 @@
 
 set -Ee
 set +u  # ROS setup 脚本会引用未定义变量
+# 启用作业控制：每个后台任务拿到**独立的进程组**，且 $! 就是该组的领头 PID。
+#
+# 为什么不用 setsid（实测踩过的坑，别改回去）：
+#   setsid 在当前进程已经是会话/进程组领头时会 fork，于是 $! 拿到的是那个
+#   【立刻退出】的中间进程 PID。后续 kill -- -PID 全部打空，节点全部残留 ——
+#   实测现象：脚本退出后 realsense2_camera_node / rgbd_odometry / rtabmap
+#   三个进程还活着，第二次启动就会和它们抢相机。
+#   set -m 没有这个问题：实测 $! 与 PGID 相等，kill -- -$! 返回 0。
+set -m
 
 VIO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SEMANTIC_WS="$VIO_DIR/semantic_ws"
@@ -64,11 +73,38 @@ if ! lsusb 2>/dev/null | grep -qi "Intel.*0b07\|RealSense"; then
   exit 1
 fi
 
-if pgrep -f "realsense2_camera_node|rtabmap_slam.*rtabmap|semantic_detector|semantic_mapper" \
-    >/dev/null 2>&1; then
+# 只匹配真实节点的可执行文件路径，并**排除自身及其祖先进程**。
+#
+# 为什么必须排除祖先进程（实测踩过的坑，别删）：
+#   pgrep -f 匹配的是「命令行里含有该字符串的任何进程」，不限于节点本身。
+#   结果调用本脚本的包装脚本/测试脚本，只要命令行里出现过这些名字，
+#   就会被当成"已有节点在运行"，脚本直接拒绝启动 —— 纯误报。
+#   实测现象：把本脚本包在一个测试 harness 里跑，harness 自己把脚本挡掉了。
+NODE_PATTERN='realsense2_camera_node|rtabmap_slam/rtabmap|rtabmap_odom/|lib/semantic_rtabmap/'
+
+_self_and_ancestors() {
+  local p=$$
+  while [ "${p:-0}" -gt 1 ]; do
+    echo "$p"
+    p="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null)" || break
+    case "$p" in ''|*[!0-9]*) break ;; esac
+  done
+}
+
+running_nodes() {
+  local skip; skip=" $(_self_and_ancestors | tr '\n' ' ') "
+  local pid
+  for pid in $(pgrep -f "$NODE_PATTERN" 2>/dev/null || true); do
+    case "$skip" in *" $pid "*) continue ;; esac
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-110
+    echo
+  done
+}
+
+if [ -n "$(running_nodes)" ]; then
   echo "错误：检测到已有相机/RTAB-Map/语义节点正在运行。" >&2
   echo "请先在原终端按 Ctrl+C 停止旧流程，再启动本脚本。" >&2
-  pgrep -af "realsense2_camera_node|rtabmap_slam.*rtabmap|semantic_detector|semantic_mapper" >&2 || true
+  running_nodes >&2
   exit 1
 fi
 
@@ -97,7 +133,8 @@ start_group() {
   local log="$LOG_DIR/${name}_$(date +%Y%m%d_%H%M%S).log"
   echo "[启动] $name"
   echo "        日志：$log"
-  setsid "$@" >"$log" 2>&1 &
+  # 不加 setsid：靠上面的 set -m 让这里成为独立进程组，$! 即 PGID。
+  "$@" >"$log" 2>&1 &
   local pid=$!
   GROUP_PIDS+=("$pid")
   echo "$pid" >"$LOG_DIR/${name}.pid"
@@ -121,12 +158,31 @@ stop_groups() {
   for pid in "${GROUP_PIDS[@]}"; do
     kill -KILL -- "-$pid" 2>/dev/null || true
   done
+
+  # 兜底清扫：按进程组再扫一遍，捞掉任何没被上面带走的孤儿。
+  # ros2 launch 的子节点偶尔会换组活下来；不清掉的话下次启动会抢相机。
+  local pg
+  for pg in $(ps -eo pgid=,args= 2>/dev/null | grep -E "$NODE_PATTERN" | grep -v grep | awk '{print $1}' | sort -u); do
+    kill -TERM -- "-$pg" 2>/dev/null || true
+  done
+  sleep 2
+  for pg in $(ps -eo pgid=,args= 2>/dev/null | grep -E "$NODE_PATTERN" | grep -v grep | awk '{print $1}' | sort -u); do
+    kill -KILL -- "-$pg" 2>/dev/null || true
+  done
+
   for pid in "${GROUP_PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
-  echo "[退出] 已清理所有展示进程。"
-  echo "[保存] RTAB-Map 数据库：$DB_PATH"
-  echo "[保存] 语义地图：$SEMANTIC_MAP"
+
+  if [ -n "$(running_nodes 2>/dev/null)" ]; then
+    echo "[警告] 仍有节点未退出：" >&2
+    running_nodes >&2
+    echo "        请手动执行： pkill -KILL -f 'realsense2_camera_node|rtabmap_slam/rtabmap|rtabmap_odom/|semantic_'" >&2
+  else
+    echo "[退出] 已清理所有展示进程。"
+    echo "[保存] RTAB-Map 数据库：$DB_PATH"
+    echo "[保存] 语义地图：$SEMANTIC_MAP"
+  fi
 }
 
 on_signal() {
