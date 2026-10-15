@@ -14,6 +14,7 @@ Coordinate conventions follow ``nav_msgs/OccupancyGrid``:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
@@ -22,6 +23,10 @@ import numpy as np
 from scipy import ndimage
 
 UNKNOWN = -1
+
+# Standard logging, not rclpy: this module is deliberately ROS-free so the
+# exploration policy stays unit-testable without a robot or a running stack.
+logger = logging.getLogger(__name__)
 
 
 def wrap_angle(angle: float) -> float:
@@ -117,6 +122,44 @@ def inflate(
     return ndimage.binary_dilation(occupied, iterations=cells)
 
 
+def _nearest_free_label(
+    free_labels: np.ndarray,
+    cx: int,
+    cy: int,
+    info: "GridInfo",
+    max_radius_m: float = 1.0,
+) -> int:
+    """Label of the free-space component nearest to cell ``(cx, cy)``, or 0.
+
+    Used when the robot's own cell carries label 0 because the map has not
+    observed it (the floor directly beneath the base is never seen by a
+    forward-facing depth camera). The robot is physically in free space, so the
+    closest free cell is the honest proxy for which component it occupies.
+
+    Rings are searched outward so the answer is the genuinely nearest cell, not
+    merely the first one found by a row-major scan. Returns 0 if nothing free
+    lies within ``max_radius_m``.
+    """
+    if free_labels.size == 0 or not info.contains_cell(cx, cy):
+        return 0
+    max_cells = int(math.ceil(max_radius_m / info.resolution)) if info.resolution > 0 else 0
+    height, width = free_labels.shape
+    for radius in range(0, max_cells + 1):
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                # Only the ring at exactly this Chebyshev radius, so the first
+                # radius that yields anything is the nearest by construction.
+                if max(abs(dx), abs(dy)) != radius:
+                    continue
+                x, y = cx + dx, cy + dy
+                if x < 0 or y < 0 or x >= width or y >= height:
+                    continue
+                label = int(free_labels[y, x])
+                if label > 0:
+                    return label
+    return 0
+
+
 def detect_frontiers(
     data: np.ndarray,
     info: GridInfo,
@@ -161,6 +204,38 @@ def detect_frontiers(
             rcx, rcy = info.world_to_cell(*robot_xy)
             if info.contains_cell(rcx, rcy):
                 robot_label = int(component_labels[rcy, rcx])
+            if robot_label <= 0:
+                # The robot's own cell is often UNKNOWN rather than free: the
+                # depth camera looks forward and down, so the floor directly
+                # under the base is never observed. ndimage.label gives such a
+                # cell label 0, and the caller used to treat that as "cannot
+                # determine reachability" and silently skip the whole filter --
+                # which made `require_reachable: true` a no-op on a fresh map
+                # (measured: robot cell unknown, robot_label 0).
+                #
+                # The robot is physically standing in free space, so the nearest
+                # free cell is the right proxy for "which component am I in".
+                robot_label = _nearest_free_label(
+                    free_labels, rcx, rcy, info, max_radius_m=1.0
+                )
+                if robot_label > 0:
+                    logger.debug(
+                        "robot cell (%d, %d) not free; using nearest free "
+                        "component %d as the reachability reference",
+                        rcx, rcy, robot_label,
+                    )
+                else:
+                    # No free space anywhere near the robot. Falling back to
+                    # permissive (as the old code did inadvertently) rather than
+                    # rejecting every frontier, but SAYING SO -- silently
+                    # disabling a check the config asked for is what caused this
+                    # to go unnoticed. Motion safety does not depend on this
+                    # filter; cmd_vel_safety and obstacle_monitor are the guards.
+                    logger.warning(
+                        "require_reachable is set but no free cell was found "
+                        "within 1.0 m of the robot; skipping the reachability "
+                        "filter this cycle"
+                    )
 
     labels, count = ndimage.label(mask, structure=np.ones((3, 3), dtype=int))
     candidates: List[Frontier] = []

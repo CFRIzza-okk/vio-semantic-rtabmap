@@ -25,8 +25,11 @@ r680_explorer:
     autostart: false
     # 默认只选点不下发，先验证选点质量再放开运动。
     dry_run: true
-    max_exploration_time: 1800.0   # 全局时间预算（秒），到点转 ABORTED
-    goal_timeout: 120.0            # 单个目标超时（秒）
+    # 首轮自主探索刻意收短预算（原值 1800 / 120）：阶段 F 的目的是看前几个
+    # 选点是否合理，2 分钟足够；阶段 G 再逐步放开。
+    max_exploration_time: 120.0    # 全局时间预算（秒），到点转 ABORTED
+    goal_timeout: 60.0             # 单个目标超时（秒）。收短后一个卡住的目标
+                                   # 不会吃掉一半预算
     max_consecutive_failures: 5    # 连续失败上限，达到转 ABORTED
     require_localization: true
     localization_timeout: 1.0

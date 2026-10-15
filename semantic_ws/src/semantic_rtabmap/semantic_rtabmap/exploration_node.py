@@ -61,6 +61,18 @@ STATE_EXPLORING = "EXPLORING"
 STATE_PAUSED = "PAUSED"
 STATE_COMPLETE = "COMPLETE"
 STATE_ABORTED = "ABORTED"
+# dry_run 专用的终态：候选被遍历完，而不是"世界上没有 frontier 了"。
+#
+# 为什么必须和 COMPLETE 分开：dry_run 的 _publish_goal 分支会把每个选中的目标
+# 拉黑，好让下一轮换一个候选。遍历完所有候选后 _on_no_goal 必然被连续调用，
+# 达到 complete_confirmations 就报 COMPLETE —— 于是一次 dry_run **必然**在
+# 十几秒内以 COMPLETE 结束。但那时一个目标都没执行、车一步没动，用
+# "no reachable frontier" 来描述是**假话**：它描述的是遍历进度，不是世界。
+# 这个假话会让人（第一次做阶段 F 演练时）把正常的 dry_run 误判成故障，
+# 也可能让人以为"地图上没地方可去"而放弃探索。
+#
+# 用独立状态表达，COMPLETE 就只在真的没有可达 frontier 时出现。
+STATE_DRY_RUN_DONE = "DRY_RUN_DONE"
 
 
 class ExplorationNode(Node):
@@ -133,6 +145,9 @@ class ExplorationNode(Node):
         self._completed_goals = 0
         self._failed_goals = 0
         self._empty_cycles = 0
+        # How many candidates the dry-run traversal has inspected. Reported in
+        # the DRY_RUN_DONE message so the number means something to the operator.
+        self._dry_run_seen = 0
         self._last_plan = 0.0
         self._battery: Optional[float] = None
         self._battery_stamp = 0.0
@@ -214,6 +229,7 @@ class ExplorationNode(Node):
         self._blacklist.clear()
         self._consecutive_failures = 0
         self._empty_cycles = 0
+        self._dry_run_seen = 0
         self._set_state(STATE_EXPLORING, "exploration started")
 
     def _srv_start(self, _req, res):
@@ -420,7 +436,12 @@ class ExplorationNode(Node):
                 % (goal.centroid[0], goal.centroid[1], goal.size, goal.score)
             )
             # In dry run the goal is never sent to Nav2; reject it locally so
-            # the next cycle evaluates a different part of the map.
+            # the next cycle evaluates a different part of the map. This makes
+            # dry_run a SWEEP of the candidates rather than a single pick --
+            # which is the point, but it also means the sweep runs out and
+            # _on_no_goal fires; see STATE_DRY_RUN_DONE for why that must not
+            # be reported as COMPLETE.
+            self._dry_run_seen += 1
             self._blacklist.add(goal.centroid[0], goal.centroid[1], now)
             self._active_goal = None
             return
@@ -431,11 +452,36 @@ class ExplorationNode(Node):
         self._empty_cycles += 1
         needed = int(self.get_parameter("complete_confirmations").value)
         if self._empty_cycles >= needed:
-            self._set_state(
-                STATE_COMPLETE,
-                "no reachable frontier after %d checks (%d goal(s) visited)"
-                % (self._empty_cycles, self._completed_goals),
-            )
+            # Two genuinely different situations reach this point in dry_run,
+            # and reporting both as COMPLETE would be wrong for one of them:
+            #
+            #   (a) no candidate was ever seen (_dry_run_seen == 0) -- e.g. a map
+            #       with no frontier at all. "no reachable frontier" is then a
+            #       TRUE statement about the world, so COMPLETE is right.
+            #   (b) candidates were seen and the sweep blacklisted them all.
+            #       Nothing was driven, so this says nothing about whether
+            #       frontiers remain -- COMPLETE would be a false claim.
+            #
+            # The discriminator is whether the sweep actually consumed anything,
+            # not merely that dry_run is on. An earlier version of this fix keyed
+            # only on dry_run and so mislabelled case (a) -- trading one false
+            # message for another. Caught by the existing test
+            # test_complete_after_repeated_empty_cycles, which drives a fully
+            # free map (no frontier at all) in dry_run and rightly expects
+            # COMPLETE.
+            if bool(self.get_parameter("dry_run").value) and self._dry_run_seen > 0:
+                self._set_state(
+                    STATE_DRY_RUN_DONE,
+                    "dry_run swept %d candidate(s); nothing was driven, so this "
+                    "says nothing about whether frontiers remain"
+                    % (self._dry_run_seen,),
+                )
+            else:
+                self._set_state(
+                    STATE_COMPLETE,
+                    "no reachable frontier after %d checks (%d goal(s) visited)"
+                    % (self._empty_cycles, self._completed_goals),
+                )
         else:
             self._set_state(
                 STATE_EXPLORING,
