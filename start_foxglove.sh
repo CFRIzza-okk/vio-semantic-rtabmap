@@ -40,10 +40,15 @@
 #  在 Foxglove 里加一个 3D 面板，Fixed Frame 设成 `map`，然后加这些话题：
 #
 #    /rtabmap/cloud_map        点云地图 —— ⭐ 主角，看建图效果
-#    /rtabmap/map              二维占据栅格（后续 Nav2 用这个）
-#    /rtabmap/odom_local_map   里程计局部地图
-#    /semantics/map_markers    语义物体标记（桌子/微波炉那些）
+#    /rtabmap/map              二维占据栅格（Nav2 用这个）
 #    /tf  /tf_static           坐标轴
+#
+#  ⚠ 这里原先还列了两个话题，实测**根本不存在**，照着找会白费功夫：
+#      /rtabmap/odom_local_map  —— 不在当前话题表里
+#      /semantics/map_markers   —— 不在当前话题表里
+#    第二个尤其要注意：本包叫 semantic_rtabmap，但这个语义标记话题**没有产出**，
+#    也就是说语义建图这一路当前没有输出。这是产品问题，不是可视化配置问题。
+#    要用 2026-10-15 实测存在的话题清单，见下面的分组。
 #
 #  ⚠ 先澄清一个常见误解：本脚本**不需要**为任何话题做“加入转发”的配置。
 #    foxglove_bridge 的默认 topic_whitelist 就是 [".*"]，即**所有话题一律转发**，
@@ -63,6 +68,61 @@
 #    /safety/stop_reason        停机原因字符串 —— **车不动时先看这个**
 #    /exploration/status        探索状态，含被拒绝目标的原因
 #    /exploration/goal          当前目标点（geometry_msgs/PoseStamped）
+#
+#  完整清单（2026-10-15 用 `ros2 topic info` 实测，括号内是发布者数量；
+#  发布者为 0 的话题加了也看不到数据，已单独标出）：
+#
+#  建图 / 地图（3D 面板）
+#    /rtabmap/cloud_map                  ⭐ 点云地图（1）
+#    /rtabmap/cloud_obstacles               障碍点云，已与地面分离（1）
+#    /rtabmap/cloud_ground                  地面点云（1）
+#    /rtabmap/map                           二维占据栅格（1）
+#    /rtabmap/octomap_occupied_space        3D 占据体素（1）
+#    /rtabmap/octomap_grid                  octomap 二维投影（1）
+#    /rtabmap/local_grid_obstacle           局部障碍栅格（1）
+#    /rtabmap/labels                        RTAB-Map 标签 MarkerArray（1）
+#
+#  导航路径（3D 面板）—— 排查“车为什么不动/怎么绕”的关键
+#    /rtabmap/global_path               ⭐ Nav2 规划的全局路径（1）
+#    /rtabmap/local_path                    局部路径（1）
+#    /rtabmap/goal                          当前 Nav2 目标（1）
+#    /rtabmap/goal_reached                  是否到达目标，bool（1）
+#
+#  定位（3D 面板）
+#    /rtabmap/localization_pose         ⭐ RTAB-Map 认为车在哪（1）
+#    /odom                                  轮式里程计，与 map->odom 对比看漂移（1）
+#    /rtabmap/global_pose                   ⚠ 发布者为 0，别加（用 localization_pose）
+#
+#  速度与安全（Plot / Raw Message 面板）
+#    /cmd_vel_nav                           Nav2 原始输出，未经限速（1）
+#    /cmd_vel_safe                      ⭐ 限速后真正发给底盘的速度（1）
+#    /safety/obstacle_stop                  障碍停机，bool（1）
+#    /safety/localization_valid             定位是否有效，bool（1）
+#    /safety/stop_reason                 ⭐ 停机原因字符串 —— 车不动时先看这个（1）
+#    /safety/estop                      ⚠ 发布者为 0。它是**输入**话题（紧急停止的
+#                                           接收端），不是状态显示，加了看不到东西
+#
+#  自主探索
+#    /exploration/status                    状态 + 被拒目标的原因（1）
+#    /exploration/state                     状态机原始状态字符串（1）
+#    /exploration/goal                      当前目标点 PoseStamped（1）
+#
+#  传感器
+#    /scan                                  深度转出的激光扫描，看障碍点是否贴住墙线（1）
+#    /camera/camera/color/image_raw     ⭐ 彩色画面，Image 面板（1）
+#    /camera/camera/depth/color/points      相机原始点云（1）
+#    /battery_voltage                       电池电压，见下方警告（1）
+#    /imu/data                          ⚠ 发布者为 0
+#
+#  系统健康
+#    /diagnostics                       ⭐ 各节点健康状态（1）
+#    /rtabmap/info                          建图统计：节点数、回环次数（1）
+#
+#  【反向】在 Foxglove 里给车下指令（3D 面板的 Publish 按钮）
+#    /goal_pose                         ⭐ Nav2 标准目标点入口，发 PoseStamped
+#    /move_base_simple/goal                 RViz 风格目标点
+#    /initialpose                           手动重设初始位姿
+#    /clicked_point                         点选一个坐标
 #
 #  ⚠ /battery_voltage 是裸 std_msgs/Float32，**没有 header、没有时间戳**。
 #    Foxglove 只能拿“收到消息的时刻”当横轴，所以曲线在时间轴上会有抖动，
