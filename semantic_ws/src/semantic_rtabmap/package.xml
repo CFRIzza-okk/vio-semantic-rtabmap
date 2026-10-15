@@ -12,6 +12,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>sensor_msgs_py</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>message_filters</exec_depend>
@@ -19,7 +20,19 @@
   <exec_depend>tf2_geometry_msgs</exec_depend>
   <exec_depend>semantic_rtabmap_msgs</exec_depend>
   <exec_depend>rtabmap_msgs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
+
+  <!-- 自主探索：frontier 探索节点依赖 Nav2 动作接口和 TF2 -->
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>depthimage_to_laserscan</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

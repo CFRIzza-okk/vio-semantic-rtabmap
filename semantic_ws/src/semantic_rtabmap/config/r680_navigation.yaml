@@ -1,0 +1,36 @@
+# R680/TX1 navigation contract. Calibrate base dimensions and camera pose
+# on the physical robot before enabling autonomous motion.
+cmd_vel_safety:
+  ros__parameters:
+    input_topic: /cmd_vel_nav
+    output_topic: /cmd_vel_safe
+    max_linear_x: 0.35
+    max_linear_y: 0.35
+    max_angular_z: 0.8
+    command_timeout: 0.5
+    localization_timeout: 0.5
+    stop_on_obstacle: true
+    require_localization: true
+
+# Use the TX1 odometry as the first-stage local odometry source.
+# The ROS 1 bridge must expose these names and only one node may publish odom->base_footprint.
+nav2_localization:
+  ros__parameters:
+    odom_frame: odom_combined
+    base_frame: base_footprint
+    global_frame: map
+    use_sim_time: false
+
+# Replace these values after measuring the R680 installation.
+r680_tf:
+  ros__parameters:
+    base_frame: base_link
+    footprint_frame: base_footprint
+    camera_frame: camera_link
+    camera_color_optical_frame: camera_color_optical_frame
+    camera_x: 0.0
+    camera_y: 0.0
+    camera_z: 0.0
+    camera_roll: 0.0
+    camera_pitch: 0.0
+    camera_yaw: 0.0

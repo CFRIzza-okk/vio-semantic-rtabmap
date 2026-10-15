@@ -1,0 +1,322 @@
+# R680 麦轮小车 Nav2 参数（ROS 2 Humble）。
+#
+# 设计前提（现场已确认的约束）：
+#   * 没有二维激光雷达，唯一的障碍来源是 D435 对齐深度经 depthimage_to_laserscan
+#     产生的 /scan，视场约 87 度，因此 raytrace/obstacle 距离都压得比较保守。
+#   * 定位与地图由 RTAB-Map 提供（map->odom_combined），所以
+#     **不使用 amcl、不使用 map_server**，global_costmap 直接订阅 RTAB-Map
+#     的占据栅格。注意那是 /rtabmap/map 而不是 /map（namespace 默认 rtabmap），
+#     所以 static_layer 里显式写了 map_topic，理由见该处注释。
+#   * 底盘是麦轮：运动学上可以横移，但实测横移有打滑和 x/y 耦合，
+#     所以 vy_max 已压到 0.0（完全禁用横移），规划上再配合 PreferForwardCritic
+#     偏向直行。
+#
+# 速度通路只有一条（这是安全属性，不要改）：
+#   controller_server ─┐
+#   behavior_server  ─┴─→ /cmd_vel_nav → cmd_vel_safety → /cmd_vel_safe → relay → TX1
+# 注意：nav2_bringup 自带的 navigation_launch.py 会让 behavior_server 和
+# velocity_smoother 直接发布到 /cmd_vel，绕过安全节点。所以本工程使用自己的
+# r680_nav2_bringup.launch.py，并且**不启动 velocity_smoother**。
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001   # 麦轮要能横移，默认 0.5 会把 vy 直接滤掉
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      # 慢速小车：15 秒内至少移动 0.25 米才算有进展。
+      required_movement_radius: 0.25
+      movement_time_allowance: 15.0
+
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.20
+      yaw_goal_tolerance: 0.30
+
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 40
+      model_dt: 0.05
+      batch_size: 1000
+      iteration_count: 1
+      prune_distance: 1.5
+      transform_tolerance: 0.2
+      temperature: 0.3
+      gamma: 0.015
+      # Omni = 麦轮全向底盘。
+      motion_model: "Omni"
+      visualize: false
+      # 速度上限：比 cmd_vel_safety 的上限更保守，先稳再快。
+      vx_max: 0.20
+      vx_min: -0.10
+      # 麦轮横移从未标定，打滑的方向和幅度都是未知的。计划 §1 要求初期把 vy 压到 0：
+      # 第一次实机运动只做"直线 + 原地旋转"，横移留到轮子标定之后再加回来。
+      vy_max: 0.0
+      wz_max: 0.5
+      vx_std: 0.2
+      vy_std: 0.1
+      wz_std: 0.3
+      retry_attempt_limit: 1
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      critics:
+        - "ConstraintCritic"
+        - "CostCritic"
+        - "GoalCritic"
+        - "GoalAngleCritic"
+        - "PathAlignCritic"
+        - "PathFollowCritic"
+        - "PathAngleCritic"
+        # 保留 PreferForwardCritic：横移不可靠，宁可多转向也少横移。
+        - "PreferForwardCritic"
+        # Omni 模型下抑制原地打转。
+        - "TwirlingCritic"
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        # 车体用 robot_radius 描述（圆形），没有多边形 footprint，
+        # 因此必须为 false：为 true 时 controller_server 会在激活阶段直接报
+        # "Considering footprint in collision checking but no robot footprint provided"。
+        # 若将来改用 footprint 多边形，可把它改回 true。
+        consider_footprint: false
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        mode: 0
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      TwirlingCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      # 局部代价地图必须落在连续的里程计坐标系里。
+      global_frame: odom_combined
+      robot_base_frame: base_footprint
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      # R680 车体半径。以用户实测的外缘 30 x 25 cm 为准（比模型尺寸保守）：
+      # 外接圆 = 0.5*sqrt(0.30^2+0.25^2) = 0.195 m，向上取 0.20 m 留安全余量。
+      # 宁可进不去窄缝，也不能让轮角蹭到。两处 costmap 必须同值。
+      robot_radius: 0.20
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          max_obstacle_height: 2.0
+          raytrace_max_range: 4.0
+          raytrace_min_range: 0.0
+          # D435 可靠深度约 3 米，超出范围的距离不可信。
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # 视场窄，膨胀半径过大会让窄通道直接不可通行，所以比默认值小。
+        inflation_radius: 0.35
+        cost_scaling_factor: 5.0
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      resolution: 0.05
+      # 与 local_costmap 同值，理由见上。
+      robot_radius: 0.20
+      # 未知区域不能当作自由空间，否则会规划穿过没探索过的地方。
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        # RTAB-Map 的地图由 latch 方式发布，这里同样用 transient_local 订阅。
+        map_subscribe_transient_local: true
+        # 必须显式写全名。RTAB-Map 的 namespace 默认是 rtabmap，它实际发布的是
+        # /rtabmap/map；而 StaticLayer 不设 map_topic 时默认订阅 /map，于是
+        # global_costmap 会一直等一个不存在的 /map，拿不到地图。
+        # 那种故障的表现是"costmap 全空、规划穿墙"，很难联想到是话题名问题，
+        # 所以这里写死而不是依赖默认值。
+        # 实测 /rtabmap/map 是 nav_msgs/OccupancyGrid，127x86 @ 0.05 m。
+        map_topic: /rtabmap/map
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          max_obstacle_height: 2.0
+          raytrace_max_range: 4.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 3.0
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.35
+        cost_scaling_factor: 5.0
+      always_send_full_costmap: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 10.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # 全向底盘不需要最小转弯半径约束，栅格规划器即可。
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.25
+      use_astar: true
+      allow_unknown: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    assisted_teleop:
+      plugin: "nav2_behaviors/AssistedTeleop"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: odom_combined
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.2
+    simulate_ahead_time: 2.0
+    # 恢复动作的速度也要小，且必须经过 cmd_vel_safety 才可能到达底盘。
+    max_rotational_vel: 0.5
+    min_rotational_vel: 0.2
+    rotational_acc_lim: 1.0
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node

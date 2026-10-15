@@ -1,0 +1,123 @@
+# R680 自主探索参数。
+#
+# 这些参数只影响“去哪里”，不影响“能不能动”：
+# 运动权限始终由 cmd_vel_safety 安全节点掌握，本文件的任何取值都不会绕过它。
+#
+# 分阶段启用顺序（务必按顺序验证）：
+#   1) dry_run: true  + autostart: false  -> 只观察选点，机器人完全不动
+#   2) dry_run: true  + 手动调 /exploration/start -> 仍不动，确认状态机流转
+#   3) dry_run: false + 场地空旷、有人守候      -> 才允许 Nav2 真正驱动底盘
+
+r680_explorer:
+  ros__parameters:
+    # ---- 接口 ----
+    # RTAB-Map 的 namespace 默认是 rtabmap，所以占据栅格发在 /rtabmap/map。
+    # 不要写 /map：那是个没人发布的话题，探索器会一直选不出 frontier。
+    # （nav2 的 static_layer 是同一处坑，已在那里显式设 map_topic。）
+    map_topic: /rtabmap/map
+    global_frame: map
+    robot_base_frame: base_footprint
+    goal_frame: map
+    navigate_action: navigate_to_pose
+
+    # ---- 安全闸门 ----
+    # 默认不动：必须由操作员显式调用 /exploration/start 才开始。
+    autostart: false
+    # 默认只选点不下发，先验证选点质量再放开运动。
+    dry_run: true
+    max_exploration_time: 1800.0   # 全局时间预算（秒），到点转 ABORTED
+    goal_timeout: 120.0            # 单个目标超时（秒）
+    max_consecutive_failures: 5    # 连续失败上限，达到转 ABORTED
+    require_localization: true
+    localization_timeout: 1.0
+    # TX1 的 /PowerVoltage 目前没有经过 relay 转发，保持关闭；
+    # 确认消息类型并转发后再设为 /battery_voltage 之类的真实话题。
+    battery_topic: ""
+    min_battery: 10.5
+
+    # ---- frontier 选择策略 ----
+    # 略大的 min_frontier_size 用来过滤 D435 深度噪声产生的碎片 frontier。
+    min_frontier_size: 10
+    max_frontiers: 64
+    occupied_threshold: 60
+    # ⚠️ 当前未被使用：frontier.py 与 exploration_node.py 都不读这个参数
+    # （只 declare 过）。真正决定碰撞半径的是 r680_nav2.yaml 里的 costmap
+    # robot_radius。这里保持同值只为避免误导，改半径请改 nav2 那份。
+    robot_radius: 0.20
+    # 目标点必须离障碍物至少这么远，避免把车送进墙角。
+    goal_clearance: 0.25
+    # 只考虑与机器人当前自由空间连通的目标，防止“隔着墙”的无效目标。
+    require_reachable: true
+    min_goal_distance: 0.4
+    # D435 可靠深度约 3 米，留出余量后探索目标不超过 6 米。
+    max_goal_distance: 6.0
+    info_gain_radius: 1.5
+
+    # score = w_size*size + w_gain*gain - w_dist*dist - w_heading*heading_err/pi
+    # gain 权重最高：优先去“能新看到最多未知区域”的 frontier，而不是单纯最近的。
+    score_weight_size: 1.0
+    score_weight_gain: 1.5
+    score_weight_distance: 1.0
+    score_weight_heading: 0.6
+
+    blacklist_radius: 0.8
+    blacklist_ttl: 90.0
+    replan_period: 3.0
+    # 连续 N 次都没有可用 frontier 才判定探索完成，避免瞬时误判。
+    complete_confirmations: 3
+
+# 障碍安全监视器：从 /scan 的前向扇区判断是否需要急停。
+# 没有 /scan 数据时按“障碍存在”处理，因为深度相机是唯一的避障传感器。
+obstacle_monitor:
+  ros__parameters:
+    scan_topic: /scan
+    output_topic: /safety/obstacle_stop
+    stop_distance: 0.45
+    slow_distance: 0.80
+    # D435 水平视场约 87 度，取 50 度作为保守的前向走廊。
+    forward_sector_deg: 50.0
+    min_valid_range: 0.15
+    scan_timeout: 1.0
+
+# 定位安全监视器：map->odom 或 odom->base_footprint 任何一段超时即判定定位失效。
+localization_monitor:
+  ros__parameters:
+    global_frame: map
+    odom_frame: odom_combined
+    base_frame: base_footprint
+    output_topic: /safety/localization_valid
+    timeout: 0.5
+    require_map_to_odom: true
+
+# 深度转二维激光：给 Nav2 costmap 和安全监视器提供障碍来源。
+#
+# output_frame **必须**是 camera_depth_frame，不能是 camera_color_optical_frame。
+#
+# 曾经这里写的是 camera_color_optical_frame，理由是"对齐深度图像和它的
+# camera_info 的 frame_id 都是它"。那个理由**混淆了两件不同的事**：
+#   * 深度图像的数据表达在哪个 frame —— camera_color_optical_frame
+#   * LaserScan 的角度语义要求哪种 frame —— **x-y 平面必须水平**
+# 这是两个独立的问题，前者不决定后者。
+#
+# REP-103 规定 LaserScan 躺在该 frame 的 x-y 平面里、z 朝上。实测 TF：
+#     base_link -> camera_depth_frame          RPY [0.000, 1.660, 0.000] 度
+#     base_link -> camera_color_optical_frame  RPY [-91.653, 0.124, -90.678] 度
+# 两者姿态差约 90 度（不只是位置差 15 mm —— 当初只看平移是漏看）。
+# camera_depth_frame 的姿态与 camera_link 一致（x 前、y 左、z 上），所以它的
+# x-y 平面是水平的，符合 LaserScan 语义；光学坐标系（z 前、x 右、y 下）的
+# x-y 平面是**像平面，竖直的**。
+#
+# 后果：安全节点 obstacle_monitor 直接读角度、不做 TF 变换，所以它不受影响——
+# 这也正是这个错误能一直藏着不暴露的原因。但 **Nav2 的 costmap 障碍层会把 scan
+# 变换到全局系**，用光学坐标系就会把障碍摆到竖直方向、错 90 度，在 costmap 里
+# 造出幽灵障碍，误导规划器。Phase F（自主探索）一开 Nav2 就会中招。
+#
+# 为什么"对准深度图像的 frame_id"不足以构成理由：把它标注为 camera_depth_frame
+# 确实带来 15 mm 的位置误差，但若换成光学坐标系，姿态就错 90 度。
+# **姿态错 90 度远比位置差 15 mm 严重**，所以取前者。
+depthimage_to_laserscan:
+  ros__parameters:
+    scan_height: 5
+    output_frame: camera_depth_frame
+    range_min: 0.25
+    range_max: 6.0

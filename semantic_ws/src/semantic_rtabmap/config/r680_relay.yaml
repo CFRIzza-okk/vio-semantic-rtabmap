@@ -1,0 +1,48 @@
+/**:
+  ros__parameters:
+    peer_host: 192.168.2.102
+    # 注意：端口语义在两侧是**相反**的，不要照着对端"对齐"着填：
+    #   ROS 2 侧： rx_port = 本机绑定口      tx_port = 发往对端的口
+    #   TX1  侧： tx_port = 本机绑定口      rx_port = 发往对端的口
+    #            ^^^^^^^ 就是这里反了
+    # 所以两边必须配成**互补**的一对才连得通：
+    #   Orin 绑 19001、发 TX1:19000   ←→   TX1 绑 19000、发 Orin:19001
+    #
+    # 历史坑：这里曾经是 rx_port=19000 / tx_port=19001，结果是
+    #   Orin 绑 19000、发 TX1:19001
+    #   TX1  绑 19000、发 Orin:19001
+    # 两边都绑 19000、都往对端 19001 发，而 19001 无人监听 —— 一个包都传不过去。
+    # 回归防护见 test/test_relay_ports.py，改这两个数之前请先跑它。
+    rx_port: 19001
+    tx_port: 19000
+    secret: change-me-r680
+    input_cmd_vel: /cmd_vel_safe
+    output_odom: /odom
+    output_imu: /imu
+    # TX1's static base_footprint -> camera_link belongs to its old camera.
+    # Filter it; Orin publishes the measured D435 extrinsic itself.
+    #
+    # Measured 2026-10-13: TX1's static_transform_publisher nodes publish to /tf,
+    # NOT /tf_static -- TX1's /tf_static carries a single *empty* message from
+    # robot_state_publisher (the URDF has no static joints).  So the relay's
+    # /tf_static path currently forwards nothing, and Orin's static tree must come
+    # from our own r680_navigation.launch.py.  Do not rely on the relay for it.
+    #
+    # This filter still matters: publish_tf() applies it for both /tf and
+    # /tf_static, and TX1's old camera TF does travel on /tf.  Verified -- Orin's
+    # /tf frame list contains no camera_link.
+    filter_tf_child: camera_link
+    drop_tf_parent: base_footprint
+    # 把 /odom 里 z/roll/pitch 的 1e6（"未估计"哨兵）换成有限值。
+    #
+    # TX1 驱动对这三个自由度填 1e6 是语义正确的（轮式底盘观测不到它们），
+    # 但 RTAB-Map 会因此报 "Very large angular variance (1000000.000000)"，
+    # 并警告图优化会变差、错误的回环可能被接受。
+    #
+    # 本车只跑平地（操作者 2026-10-14 确认），"底盘保持水平"成立，所以这里打开，
+    # 让 RTAB-Map 能用上这个约束，而不是把位姿当作完全未知。
+    #
+    # 节点默认值是 false —— 不带本 yaml 直接跑 relay 时仍逐字节忠实转发
+    # （与 peer_host 的既有约定相同）。只替换哨兵：若 TX1 将来上报真实值，
+    # 此开关自动变成空操作。回归防护见 test/test_relay_odom_covariance.py。
+    planar_odom_covariance: true

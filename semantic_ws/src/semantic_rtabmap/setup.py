@@ -26,6 +26,12 @@ setup(
         "console_scripts": [
             "detector_node = semantic_rtabmap.detector_node:main",
             "mapper_node = semantic_rtabmap.mapper_node:main",
+            "cmd_vel_safety_node = semantic_rtabmap.cmd_vel_safety_node:main",
+            "ros2_relay_node = semantic_rtabmap.ros2_relay_node:main",
+            "obstacle_monitor_node = semantic_rtabmap.safety_monitor_node:main",
+            "localization_monitor_node = semantic_rtabmap.safety_monitor_node:main_localization",
+            "exploration_node = semantic_rtabmap.exploration_node:main",
+            "point_cloud_inspector_node = semantic_rtabmap.point_cloud_inspector_node:main",
         ],
     },
 )

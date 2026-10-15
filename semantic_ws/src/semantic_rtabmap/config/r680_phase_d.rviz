@@ -1,0 +1,153 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Map1
+      Splitter Ratio: 0.5
+    Tree Height: 700
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Cell Size: 1
+      Color: 160; 160; 164
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+
+    # RTAB-Map's occupancy grid. The topic is /rtabmap/map, NOT /map: RTAB-Map's
+    # default namespace is `rtabmap`. A viewer pointed at /map stays empty and
+    # looks like "mapping is broken" when it is not.
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Map1
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rtabmap/map
+      Alpha: 1
+      Color Scheme: map
+      Draw Behind: true
+
+    # The depth-derived scan. RED.
+    - Class: rviz_default_plugins/LaserScan
+      Enabled: true
+      Name: LaserScan1
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /scan
+      Style: Points
+      Size (Pixels): 4
+      Size (m): 0.02
+      Color: 255; 0; 0
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Selectable: false
+
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Marker Scale: 0.4
+      Update Interval: 0
+
+    - Class: rviz_default_plugins/RobotModel
+      Enabled: true
+      Name: RobotModel
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Visual Enabled: true
+      Alpha: 0.6
+
+    # Where the explorer wants to go. GREEN. Must stay clear of walls -- that is
+    # the Phase D acceptance check.
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: ExplorationGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /exploration/goal
+      Color: 0; 255; 0
+      Shaft Length: 0.6
+      Shaft Radius: 0.03
+      Head Length: 0.15
+      Head Radius: 0.07
+      Alpha: 1
+
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: Odometry
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /odom
+      Keep: 200
+      Shape: Arrow
+      Arrow Length: 0.2
+      Color: 0; 170; 255
+      Covariance:
+        Value: false
+
+  Global Options:
+    Background Color: 48; 48; 48
+    # Fixed Frame is `map`, NOT base_footprint, and that is deliberate.
+    #
+    # /rtabmap/map is latched and stamped when RTAB-Map last rebuilt the grid --
+    # which, with the robot standing still, is whenever it started, i.e. minutes
+    # in the past. RViz transforms a display into the fixed frame using the
+    # message's own timestamp, so with Fixed Frame = base_footprint every map
+    # update is rejected with:
+    #   Message Filter dropping message: frame 'map' ... the timestamp on the
+    #   message is earlier than all the data in the transform cache
+    # and the grid never appears -- looking exactly like "mapping is broken".
+    #
+    # The grid is already expressed IN `map`, so making `map` the fixed frame
+    # removes the lookup entirely and the map renders immediately.
+    Fixed Frame: map
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: TopDownOrtho
+      Enable Stereo Rendering: false
+      Invert Z Axis: false
+      Near Clip Distance: 0.01
+      Scale: 80
+      Target Frame: <Fixed Frame>
+      X: 2.5
+      Y: 0.4
+    Saved: ~
+Window Geometry:
+  Height: 900
+  Width: 1500
+  X: 0
+  Y: 0
