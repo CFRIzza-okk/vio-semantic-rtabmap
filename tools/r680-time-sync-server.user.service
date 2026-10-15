@@ -1,0 +1,15 @@
+[Unit]
+Description=R680 UDP time responder for TX1 (Jetson side)
+Documentation=file:/home/jetson/VIO/tools/time_sync_server.py
+# TX1 syncs to this responder because its own RTC is dead and it has no
+# internet. Binds a high port so it can run as a normal user.
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/jetson/VIO/tools/time_sync_server.py --bind 0.0.0.0 --port 10123
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

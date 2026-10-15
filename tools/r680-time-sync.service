@@ -1,0 +1,18 @@
+[Unit]
+Description=R680 TX1 clock sync from Jetson over the wired link
+Documentation=file:/home/wheeltec/time_sync_client.py
+# TX1 has a dead RTC and no internet, so the Jetson is the only time reference.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/wheeltec/time_sync_client.py --server 192.168.2.15 --port 10123 --interval 10 --threshold 0.005 --timeout 1.0 --samples 3
+Restart=always
+RestartSec=5
+# Runs as root so it may call clock_settime(CLOCK_REALTIME).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
