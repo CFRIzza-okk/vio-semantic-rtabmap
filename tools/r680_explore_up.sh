@@ -32,8 +32,12 @@ MAX_ANG=0.35
 
 # 预算收紧。原默认是 1800 s / 120 s,对第一次探索太长:
 # 一旦选点或规划有问题,车会一直试下去。120 s 足够看出行为是否正确。
-MAX_EXPLORE_TIME=120.0
-GOAL_TIMEOUT=60.0
+# 预算**只用于横幅显示**。r680_exploration.launch.py 并不声明
+# max_exploration_time / goal_timeout,所以在这里改这两个数**不会**改变实际
+# 预算 —— 真正设预算的唯一位置是 r680_explore_start.sh。允许环境覆盖,是为了
+# 让横幅和实际值一致(r680_explore_300.sh 会 export 它们),否则横幅会撒谎。
+MAX_EXPLORE_TIME="${MAX_EXPLORE_TIME:-120.0}"
+GOAL_TIMEOUT="${GOAL_TIMEOUT:-60.0}"
 
 MODE=up            # up | rehearsal
 USE_GATE=1
