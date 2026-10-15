@@ -121,6 +121,29 @@ class Relay(Node):
 
     def sign(self, raw): return hmac.new(self.secret.encode(), raw, hashlib.sha256).hexdigest()
     @staticmethod
+    def canonical(obj):
+        """Serialise a relay body into the exact bytes that get signed.
+
+        `sort_keys=True` is load-bearing, not cosmetic. The two ends run
+        different Python versions (TX1: 2.7 on Melodic, Orin: 3.10 on Humble) and
+        their dict key orders differ -- Python 3 preserves insertion order,
+        Python 2.7 is hash-ordered. Signing a body serialised in each side's own
+        order yields different bytes for identical data, so the HMAC never
+        matches at the far end.
+
+        That asymmetry is why this hid for so long: the uplink matched anyway,
+        because the receiver re-serialised a dict whose key order had come from
+        the JSON text. Only cmd_vel -- built fresh as a Python 3 dict and then
+        verified by Python 2 -- was rejected, as a throttled "invalid relay
+        packet" warning that read like noise. Mapping and odometry were perfect
+        the entire time; the robot never received one single velocity command.
+
+        This MUST stay byte-identical to _canonical() in tools/ros1_relay.py.
+        Changing one side alone breaks the direction that currently works.
+        """
+        return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode()
+
+    @staticmethod
     def stamp(s):
         from builtin_interfaces.msg import Time
         t = Time(); t.sec = int(s.get("sec", 0)); t.nanosec = int(s.get("nanosec", 0)); return t
@@ -135,8 +158,18 @@ class Relay(Node):
             except socket.timeout: continue
             except OSError: return
             try:
-                outer=json.loads(packet.decode()); body=outer["body"]; raw=json.dumps(body,separators=(",", ":")).encode()
-                if not hmac.compare_digest(outer["sig"], self.sign(raw)): continue
+                outer=json.loads(packet.decode()); body=outer["body"]; raw=self.canonical(body)
+                # Encode to bytes explicitly. Python 3 tolerates
+                # compare_digest(str, str) while the string is pure ASCII, so
+                # this side works either way -- but the TX1 verifier runs on
+                # Python 2, where compare_digest() raises TypeError for a unicode
+                # argument ("'unicode' does not have the buffer interface") even
+                # though json.loads() always returns unicode there. That
+                # TypeError was caught by the generic handler and reported as
+                # "invalid relay packet", silently discarding every cmd_vel.
+                # Keeping both sides explicit stops the interpreter asymmetry
+                # from being the only thing between this and a repeat.
+                if not hmac.compare_digest(outer["sig"].encode("ascii"), self.sign(raw)): continue
                 kind, p=body["kind"], body["payload"]
                 if kind == "odom": self.publish_odom(p)
                 elif kind == "imu": self.publish_imu(p)
@@ -171,7 +204,7 @@ class Relay(Node):
     def send_cmd(self,msg):
         p={"linear":{"x":msg.linear.x,"y":msg.linear.y,"z":msg.linear.z},"angular":{"x":msg.angular.x,"y":msg.angular.y,"z":msg.angular.z}}
         self.cmd_seq += 1
-        body={"kind":"cmd_vel","seq":self.cmd_seq,"payload":p,"sent_at":int(time.time()*1000000000)}; raw=json.dumps(body,separators=(",", ":")).encode(); packet=json.dumps({"body":body,"sig":self.sign(raw)},separators=(",", ":")).encode()
+        body={"kind":"cmd_vel","seq":self.cmd_seq,"payload":p,"sent_at":int(time.time()*1000000000)}; raw=self.canonical(body); packet=json.dumps({"body":body,"sig":self.sign(raw)},separators=(",", ":"),sort_keys=True).encode()
         try: self.sock.sendto(packet,self.peer)
         except OSError as e: self.get_logger().warning("relay send failed: %s" % e)
     def destroy_node(self):

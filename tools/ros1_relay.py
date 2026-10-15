@@ -33,6 +33,36 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 from tf2_msgs.msg import TFMessage
 
+
+def _canonical(obj):
+    """Serialise a relay body into the exact bytes that get signed.
+
+    `sort_keys=True` is not cosmetic -- it is the whole point.
+
+    The two ends of this relay run different Python versions: TX1 is ROS Melodic
+    on Python 2.7, the Orin is ROS 2 Humble on Python 3.10. A plain
+    `json.dumps(body)` emits keys in each interpreter's own dict order -- and
+    those orders differ. Python 3 dicts preserve insertion order; Python 2.7
+    dicts are hash-ordered. So the SAME body serialises to DIFFERENT bytes
+    depending on which side does it, the HMAC over it differs, and the receiver
+    rejects the packet.
+
+    That asymmetry hid the bug for a long time. TX1 always signs what TX1
+    serialised, and the Orin -- on receipt -- re-serialises a dict whose key
+    order came from the JSON text, so the uplink (odom, imu, tf, battery) always
+    matched. Only the downlink (cmd_vel) was re-serialised from a Python 3 dict
+    by a Python 2 process, and every velocity packet was silently dropped as
+    "invalid relay packet". Mapping and odometry looked perfect throughout; the
+    robot simply never received a single command.
+
+    Sorting makes the bytes a pure function of the data, independent of the
+    interpreter on either end. Any change here MUST be applied to both sides at
+    once -- a one-sided change breaks the link in the direction that currently
+    works.
+    """
+    return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode()
+
+
 # py2: time.monotonic() is Python 3.3+. On 2.7 it raises AttributeError, which
 # would have crashed the safety watchdog the moment cmd_vel was enabled.
 # time.time() is the only portable fallback; the watchdog tolerates wall-clock
@@ -139,8 +169,9 @@ class Relay:
         # diagnostic only and does not replace the preserved ROS header stamp.
         sent_at = int(time.time() * 1000000000)
         msg = {"kind": kind, "seq": self.tx_seq, "payload": payload, "sent_at": sent_at}
-        raw = json.dumps(msg, separators=(",", ":")).encode()
-        packet = json.dumps({"body": msg, "sig": self.sign(raw)}, separators=(",", ":")).encode()
+        raw = _canonical(msg)
+        packet = json.dumps({"body": msg, "sig": self.sign(raw)},
+                            separators=(",", ":"), sort_keys=True).encode()
         try: self.sock.sendto(packet, self.peer)
         except _SOCKET_ERRORS as e: rospy.logwarn_throttle(5.0, "relay send failed: %s", e)
 
@@ -151,8 +182,29 @@ class Relay:
             except _SOCKET_ERRORS: return
             try:
                 outer = json.loads(packet.decode()); body = outer["body"]
-                raw = json.dumps(body, separators=(",", ":")).encode()
-                if not hmac.compare_digest(outer["sig"], self.sign(raw)) or body.get("kind") != "cmd_vel": continue
+                # Must use the same canonical form the sender signed. See
+                # _canonical(): re-serialising with the interpreter's own dict
+                # order would produce different bytes.
+                raw = _canonical(body)
+                # .encode("ascii") is NOT decoration -- without it every downlink
+                # packet is discarded.
+                #
+                # json.loads() hands back `unicode` on Python 2, while
+                # sign() returns a `str` hexdigest. Python 2's
+                # hmac.compare_digest() requires two byte strings and raises
+                # "TypeError: 'unicode' does not have the buffer interface" for a
+                # unicode argument -- for EVERY packet, however valid. The
+                # except below swallowed that TypeError into the same generic
+                # warning as a bad signature, so the symptom was one throttled
+                # "invalid relay packet" line every five seconds, with valid
+                # cmd_vel payloads and growing sequence numbers right there in
+                # the log, and a robot that never moved.
+                #
+                # The uplink never hit this: its verifier runs on Python 3, whose
+                # compare_digest() accepts str. One more asymmetry that let the
+                # bug live.
+                if not hmac.compare_digest(outer["sig"].encode("ascii"), self.sign(raw)) \
+                        or body.get("kind") != "cmd_vel": continue
                 if not self.enable_cmd_vel: continue
                 seq = int(body.get("seq", -1))
                 if seq <= self.last_seq: continue
@@ -170,8 +222,17 @@ class Relay:
             # not exist, so the except clause itself raised AttributeError on
             # the first malformed packet. 2.7's json raises ValueError, and on
             # 3.5+ JSONDecodeError subclasses ValueError, so this covers both.
-            except (ValueError, KeyError, TypeError):
-                rospy.logwarn_throttle(5.0, "invalid relay packet")
+            #
+            # The message names the exception type and quotes the offending
+            # bytes. One generic "invalid relay packet" for a malformed
+            # datagram, a failed HMAC and a missing key made a real outage look
+            # like background noise: cmd_vel was dropped for a long time and the
+            # only symptom was one throttled line every five seconds, with no
+            # way to tell which of the three it was or what had arrived.
+            except (ValueError, KeyError, TypeError) as exc:
+                rospy.logwarn_throttle(
+                    5.0, "invalid relay packet: %s: %s | first 200 bytes: %.200r",
+                    type(exc).__name__, exc, packet)
 
     def watchdog(self, _):
         if self.enable_cmd_vel and _monotonic() - self.last_cmd > self.cmd_timeout:
