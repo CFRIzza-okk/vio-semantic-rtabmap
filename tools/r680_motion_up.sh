@@ -86,23 +86,49 @@ timeout 8 rostopic info /cmd_vel 2>&1 | head -5" 2>&1 | tail -14
     # 仍然必须是 false,否则 rgbd_odometry 会再发一个 /odom,与 relay 打架。
 
 # ---------------------------------------------------------------- Orin side
+# Orin 侧**也必须**先清理。漏掉这一步的后果不是"多几个进程",而是每个节点都
+# 变成两个,静静地互相打架:两条 /cmd_vel_safe 发布者竞争(速度指令交替被覆盖)、
+# 两个 localization_valid 发布者、两份 /scan 与 /rtabmap/map。
+#
+# 实测连跑两次:节点总数 22 -> 43,/r680_ros2_relay 1 -> 3。而**没有任何一处
+# 会报错**,验收只会显示一行 "Publisher count: 2" —— 那是最容易被当成正常的
+# 一行。这与 test_safety_monitors.py 那 3 个"假失败"是同一个根因。
+#
+# 必须在 source ROS 之后做:ros2 node list 需要那个环境。
 cd "$WS" || exit 1
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
 source install/setup.bash >/dev/null 2>&1
 export ROS_DOMAIN_ID=99
 
-say "3/6 Orin relay"
+say "3/6 Orin: 清理上一次整栈(必须先做,否则会叠加成两套)"
+python3 /home/jetson/VIO/tools/safe_kill.py --signal TERM \
+    ros2_relay_node exploration_node obstacle_monitor_node localization_monitor_node \
+    depthimage_to_laserscan cmd_vel_safety_node rtabmap nav2 realsense lifecycle_manager \
+    controller_server planner_server bt_navigator behavior_server waypoint_follower \
+    costmap static_transform rviz 2>&1 | tail -2
+sleep 8
+python3 /home/jetson/VIO/tools/safe_kill.py --signal KILL \
+    ros2_relay_node exploration_node obstacle_monitor_node localization_monitor_node \
+    depthimage_to_laserscan cmd_vel_safety_node rtabmap nav2 realsense lifecycle_manager \
+    controller_server planner_server bt_navigator behavior_server waypoint_follower \
+    costmap static_transform rviz 2>&1 | tail -2
+sleep 6
+printf '  清理后残留节点数(应为 0): '
+timeout 15 ros2 node list 2>/dev/null | wc -l
+
+
+say "4/6 Orin relay"
 nohup ros2 launch semantic_rtabmap r680_relay.launch.py > "$TMP/relay.log" 2>&1 &
 sleep 10
 timeout 10 ros2 topic info /odom 2>&1 | head -2
 
-say "4/6 camera"
+say "5/6 camera"
 nohup ros2 launch semantic_rtabmap r680_depth_cloud.launch.py \
     start_inspector:=false > "$TMP/cam.log" 2>&1 &
 sleep 22
 timeout 10 ros2 topic info /camera/camera/aligned_depth_to_color/image_raw 2>&1 | head -2
 
-say "5/6 static TF + cmd_vel_safety（放宽到极限 0.08/0.0/0.3）"
+say "6/6 static TF + cmd_vel_safety（放宽到极限 0.08/0.0/0.3）"
 nohup ros2 launch semantic_rtabmap r680_navigation.launch.py \
     publish_base_tf:=false \
     max_linear_x:=$MAX_LIN max_linear_y:=$MAX_LAT max_angular_z:=$MAX_ANG \
@@ -113,7 +139,7 @@ for p in max_linear_x max_linear_y max_angular_z command_timeout; do
   timeout 8 ros2 param get /cmd_vel_safety "$p" 2>&1 | tail -1
 done
 
-say "6/6 RTAB-Map"
+say "7/6 RTAB-Map"
 rm -f "$HOME/.ros/rtabmap_motion.db"
 nohup ros2 launch rtabmap_launch rtabmap.launch.py \
     visual_odometry:=false icp_odometry:=false \

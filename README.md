@@ -251,6 +251,38 @@ relay 脚本在 `tools/ros1_relay.py`，部署与排障说明见 [tools/README_R
     **排查提示**：`Invalid frame ID "map" ... frame does not exist` 是一句 INFO
     级别的日志，夹在生命周期启动的一堆输出里。它才是根因，而它长得像背景噪声。
 
+> **一个"看起来吓人、实际无害"的告警（2026-10-15 实测）。**
+> 相机启动时内核会打印几条：
+>
+> ```
+> usb 2-1.1: Failed to query (GET_CUR) UVC control 1 on unit 3: -32 (exp. 1024)
+> ```
+>
+> `-32` 是 `EPIPE`。这是 **RealSense 与 Linux UVC 的已知组合问题**：内核枚举时
+> 尝试读取某些 UVC 控制项（unit 3 的 control 1，通常是自动曝光类），而这些
+> 控制项不支持读取。**每次正常启动都会出现几条，不影响图像流。**
+>
+> 实测对照（同一次启动）：
+>
+> | 信号 | 值 |
+> |---|---|
+> | `GET_CUR` 告警 | 4 条 |
+> | 相机节点自身报错 | **0** |
+> | 深度图 | 640×480 16UC1，**有效像素 88.9%**，中位 2935 mm |
+> | 设备掉线 | 无 |
+>
+> **它值得记下来的原因不是它有害，而是它有害的样子。** 真实的故障长这样
+> （同样是这台相机）：
+>
+> ```
+> [realsense2_camera_node]: No RealSense devices were found!   ← 每 6 秒一次，刷屏
+> usb 2-1.1: USB disconnect, device number 3                   ← 内核对物理断开的确证
+> ```
+>
+> 判据要落在**有效像素率**上，而不是"有没有告警"。`GET_CUR` 出现 4 次而有效
+> 像素 88.9%，是健康的；`No RealSense devices were found` 出现 1 次，就是不健康的
+> —— 因为后者意味着**相机根本不在总线上**。
+
 11. **整栈启动脚本只清 TX1、不清 Orin —— 连跑两次会叠成两套**（2026-10-15 修复）。
     `r680_motion_up.sh` / 初版 `r680_explore_up.sh` 都只在 TX1 侧做清理，
     Orin 侧直接启动。连跑两次的实测结果：
