@@ -175,9 +175,60 @@ def selftest():
         failures += 0 if ok else 1
         emit("    真实 %+5d 束 -> 估计 %+5d 束  %s  (吻合率 %.0f%%)"
              % (truth, got, "✓" if ok else "✗", score * 100))
-    emit("  %s" % ("自检全部通过" if failures == 0
-                   else "自检有 %d 项失败 —— 不要相信实测结果" % failures))
-    return failures
+    emit("  %s" % ("第一部分通过" if failures == 0
+                   else "第一部分有 %d 项失败" % failures))
+
+    # --- part 2: the SIGN of the recovered angle ---------------------------
+    # Part 1 only proves the estimator finds the right integer shift. It says
+    # nothing about whether caller code converts that shift into an angle with
+    # the right sign -- and that is exactly the bug this tool shipped with: it
+    # reported -24.96 deg on the first real run while the encoders said
+    # +27.92 deg, which reads as "the two sensors disagree about direction of
+    # rotation" when in truth they agreed and the conversion was wrong.
+    #
+    # So simulate the geometry properly: a continuous world surface, sampled by
+    # a robot at a known heading. This tests the whole chain, shift -> angle.
+    def world(beta_deg):
+        b = math.radians(beta_deg)
+        return (2.5 + 1.0 * math.sin(2.3 * b) + 0.6 * math.cos(5.1 * b)
+                + 0.25 * math.sin(11.0 * b))
+
+    a_min, a_max, n2 = -0.48, 0.49, 640
+    inc2 = (a_max - a_min) / (n2 - 1)
+
+    def scan_at(heading):
+        return [world(math.degrees(a_min + i * inc2 + heading))
+                for i in range(n2)]
+
+    emit("")
+    emit("  几何仿真：已知航向变化，验证 shift -> 角度的**符号**")
+    emit("    视场 %.1f 度，可测范围约 ±%.1f 度（超过则重叠不足）"
+         % (math.degrees(a_max - a_min), math.degrees(a_max - a_min) / 2.0))
+    # Angles are kept inside half the field of view on purpose. Beyond that the
+    # two profiles overlap too little and the estimate degrades -- at +-30 deg
+    # on a 55.6 deg field this estimator returns 27.83 instead of 30.00, i.e.
+    # a genuine limitation of the method, not a bug in the sign. The caller is
+    # responsible for flagging out-of-range results; this test pins the sign
+    # and the accuracy where the method is actually valid.
+    sign_failures = 0
+    for truth_deg in (25, -25, -20, 10, -8, 15):
+        th = math.radians(truth_deg)
+        shift, _, _ = estimate_shift(scan_at(0.0), scan_at(th), 900)
+        angle = -shift * inc2          # the conversion the caller must use
+        ok = abs(math.degrees(angle) - truth_deg) < 1.0
+        sign_failures += 0 if ok else 1
+        emit("    真实航向 %+4d 度 -> 换算得 %+7.2f 度  %s"
+             % (truth_deg, math.degrees(angle), "✓" if ok else "✗"))
+    if sign_failures:
+        emit("  ⚠ 符号换算错误 —— 实测的转角符号不可信")
+    else:
+        emit("    符号正确：theta = -shift * 角增量（与实测脚本一致）")
+
+    total = failures + sign_failures
+    emit("")
+    emit("  %s" % ("自检全部通过" if total == 0
+                   else "自检有 %d 项失败 —— 不要相信实测结果" % total))
+    return total
 
 
 def main():
@@ -260,18 +311,43 @@ def main():
     emit("     预期: %+.2f 度" % math.degrees(expected))
 
     # --- the independent measurement --------------------------------------
+    # SIGN: theta = -shift * increment, NOT +shift * increment.
+    #
+    # The LaserScan convention is a_i = angle_min + i*increment. Rotating the
+    # robot by theta (positive = counter-clockwise about +z) moves a fixed world
+    # feature from robot-frame bearing beta to beta - theta, so its index goes
+    # from i to i - theta/increment:
+    #
+    #     shift = i_after - i_before = -theta/increment   =>   theta = -shift*inc
+    #
+    # This tool originally computed +shift*inc and therefore reported the turn
+    # with the wrong sign. On the first real run it printed -24.96 deg while the
+    # encoders said +27.92 deg, which looks like two sensors disagreeing about
+    # the direction of rotation -- when in fact they agreed, and the bug was in
+    # this line. The sign is now pinned by the geometric selftest below, which
+    # simulates a known rotation rather than trusting the algebra.
     d_cam = None
     score = None
+    saturated = False
     if before_scan is not None and node.scan is not None and before_meta is not None:
         inc = before_meta[1]
-        max_shift = int(abs(math.radians(80.0)) / abs(inc)) if inc else 200
+        fov = abs(before_meta[1]) * len(before_scan)
+        # A rotation larger than roughly half the field of view leaves too little
+        # overlap between the two profiles for the match to mean anything, so
+        # search a bit beyond that and flag the result if it lands at the edge.
+        max_shift = int(math.radians(60.0) / abs(inc)) if inc else 200
         shift, score, _ = estimate_shift(before_scan, node.scan, max_shift)
-        d_cam = shift * inc
+        d_cam = -shift * inc
+        saturated = abs(shift) >= max_shift * 0.98
         emit("")
         emit("  ② 深度相机（独立于编码器）转角: %+.2f 度" % math.degrees(d_cam))
         emit("     依据: 旋转 theta 后，固定世界特征在机器人系中的方位角平移 theta，")
-        emit("           故扫描剖面的最佳匹配平移量 = 转角")
+        emit("           故扫描剖面的最佳匹配平移量 = -theta/角增量")
         emit("     匹配质量: %.0f%% 的光束对吻合（<0.15 m 视为吻合）" % (score * 100))
+        emit("     视场: %.1f 度 —— 超过约一半视场(%.1f 度)的旋转重叠不足，测不准"
+             % (math.degrees(fov), math.degrees(fov) / 2.0))
+        if saturated:
+            emit("     ⚠ 匹配落在搜索边界 —— 实际转角可能超出可测范围，此值不可信")
         if score < 0.5:
             emit("     ⚠ 匹配质量偏低 —— 场景可能有移动物体，此独立测量不可信")
     else:
