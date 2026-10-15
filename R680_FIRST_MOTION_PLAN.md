@@ -666,3 +666,87 @@ hmac.compare_digest(outer["sig"], self.sign(raw))
 2. **TX1 侧清理与启动必须分成两次 ssh 调用**。写在同一条命令里时，`pkill` 的
    模式会匹配到承载它的那个 shell 自己，shell 在启动行执行前就死了。
    括号技巧 `"[r]os1_relay"` 只在**同一条命令里没有该名字的普通出现**时有效。
+
+---
+
+## 12. 第一次启动 Nav2 暴露的两个缺陷（2026-10-15）
+
+E1/E2 通过后按计划准备 Phase F（自主探索）。**在闸门关闭的情况下**起整栈验证
+Nav2 能否激活 —— 这一步不需要运动，却抓到了两个独立缺陷。
+
+### 缺陷 C：`odom_frame_id` 为空 → Nav2 只起来一半
+
+`controller_server` 是 `active`，但 `planner_server`、`bt_navigator`、
+`behavior_server`、`waypoint_follower` **全部停在 `inactive`**。
+
+根因是一句被当成背景噪声的 INFO 日志（**不是 ERROR**）：
+
+```
+Invalid frame ID "map" passed to canTransform argument target_frame - frame does not exist
+```
+
+**`map` 这个 frame 不存在** —— 而 RTAB-Map 明明在跑、`/rtabmap/map` 正常发布。
+病根是一个空字符串：`rtabmap: odom_frame_id = ""`。
+
+RTAB-Map 要发 `map → odom` 就必须知道 odom frame 叫什么；空值时**一个
+`map→*` 的 TF 都不发**，于是 global_costmap 永远等不到，planner_server 卡在
+初始化，lifecycle_manager 的顺序被阻塞，后面三个节点全部 inactive。
+
+**修法：`odom_frame_id:=odom_combined`**（relay 实际发布的 frame，实测 TX1
+`/odom` 的 `frame_id` 就是它）。
+
+**⚠️ 不要与"不要开 `visual_odometry`"混淆**，两者是不同的事：
+
+| 参数 | 作用 | 值 |
+|---|---|---|
+| `odom_frame_id` | RTAB-Map **相信**哪个 frame 是里程计坐标系 | **必须设 `odom_combined`** |
+| `visual_odometry` | 让 `rgbd_odometry` **自己算**里程计并发 `/odom` | **必须 `false`**（否则与 relay 打架） |
+
+**为什么 Phase D 没暴露**：Phase D 不启动 Nav2。又一次"一条从未被走过的路径"。
+
+### 缺陷 D：启动脚本只清 TX1、不清 Orin → 叠成两套
+
+连跑两次整栈脚本的实测：
+
+| 量 | 单次 | 连跑两次 |
+|---|---|---|
+| 节点总数 | 22 | **43** |
+| `/r680_ros2_relay` | 1 | **3** |
+| 各 Nav2 节点 | 1 | **2** |
+
+两套栈**静静地互相打架**：两条 `/cmd_vel_safe` 发布者竞争、两个
+`localization_valid` 发布者（标志可能一真一假）、两份 `/scan`。
+
+**没有任何一处会报错**，验收只会显示 `Publisher count: 2`。这与
+`test_safety_monitors.py` 那 3 个"假失败"是同一个根因，只是一个在测试里、
+一个在真机上。
+
+### 顺带查清的一个"假故障"
+
+相机缺席时出现了一串看起来独立的故障，其实是一个物理原因的干净因果：
+
+```
+相机掉线  →  没有 camera_info  →  /scan 一帧不出
+          →  obstacle_monitor 按 fail-safe 判"有障碍"  →  obstacle_stop = true
+          →  localization_valid 也变 false
+```
+
+内核证据（精确到秒）：
+
+```
+Oct 15 19:02:49  Found UVC 1.50 device Intel(R) RealSense(TM) Depth Camera 435
+Oct 15 19:31:09  usb 2-1.1: USB disconnect, device number 3      ← 物理断开
+Oct 15 20:15:09  usb 2-1.1: new SuperSpeed USB device number 4   ← 重插后恢复
+```
+
+**19:31:09 那次没有任何软件活动**：没有 reset、没有过流告警、没有驱动报错，
+只有孤零零一行 `USB disconnect`，且之后再没自动恢复。重插同一路径即好 ——
+确认是接触问题。时间上正好在插充电线前后，插拔的震动或供电切换的瞬变足以
+让 USB 接触断开。
+
+**教训**：`obstacle_stop = true` 在这里的含义是"**我没看见任何东西**"，不是
+"我看见前面有东西"。`obstacle_monitor` 拿不到数据时按"有障碍"处理是**正确的
+fail-safe 设计**，但它的日志必须一起看才能区分这两种情况 ——
+`obstacle_stop -> True (min_range=n/a)` 里的 `n/a` 才是关键。
+
+---

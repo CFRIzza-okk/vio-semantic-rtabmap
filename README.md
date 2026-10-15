@@ -205,6 +205,74 @@ relay 脚本在 `tools/ros1_relay.py`，部署与排障说明见 [tools/README_R
    >   `cmd_vel_timeout`）。**必须加 `-w 1`** 等待匹配订阅者。
    > - **TX1 侧的清理与启动必须分成两次 ssh 调用**。写在同一条命令里时，`pkill`
    >   的模式会匹配到承载它的那个 shell 自己，shell 在启动行执行前就死了（现象：
+
+10. **RTAB-Map 的 `odom_frame_id` 为空 —— 导致 Nav2 完全起不来**（2026-10-15 发现并修复）。
+    第一次真正启动 Nav2 时，`controller_server` 是 `active`，而
+    `planner_server` / `bt_navigator` / `behavior_server` / `waypoint_follower`
+    全部停在 `inactive`。现象是"Nav2 起了一半"。
+
+    日志里的根因是一句反复刷屏的 INFO（不是 ERROR，所以很容易被跳过）：
+
+    ```
+    [global_costmap] Timed out waiting for transform from base_footprint to map
+                     to become available, tf error: Invalid frame ID "map"
+                     passed to canTransform argument target_frame - frame does not exist
+    ```
+
+    **`map` 这个 frame 在整棵 TF 树里根本不存在。** 而 RTAB-Map 明明在跑、
+    `/rtabmap/map` 也正常发布。原因是一个**空字符串**：
+
+    ```
+    rtabmap: odom_frame_id = ""       ← 空
+    rtabmap: map_frame_id  = "map"
+    ```
+
+    RTAB-Map 要发布 `map → odom` 这个变换，就必须知道 odom frame 叫什么。
+    `odom_frame_id` 为空时它**一个 `map→*` 的 TF 都不发**，于是：
+
+    `map` 不存在 → global_costmap 永远等不到 → `planner_server` 卡在初始化 →
+    `lifecycle_manager` 的启动顺序被阻塞 → 后面三个节点全部 inactive。
+
+    修法：`odom_frame_id:=odom_combined`，即 **relay 实际发布的那个 frame**
+    （实测 TX1 `/odom` 是 `frame_id: "odom_combined"`、`child_frame_id:
+    "base_footprint"`）。这与 Nav2 配置里的 `global_frame: odom_combined` 和
+    探索配置里的 `odom_frame: odom_combined` 也对上了。
+
+    **⚠️ 这条修法与"不要开 `visual_odometry`"不是一回事，容易混淆：**
+    这里设的是 RTAB-Map **相信**哪个 frame 是里程计坐标系；而
+    `visual_odometry:=true` 会让 `rgbd_odometry` **自己再算一个里程计并发布
+    `/odom`**，与 relay 转发的轮式里程计打架。后者仍然必须保持 `false`。
+    实测两者独立：设了 `odom_frame_id` 之后 `/odom` 的发布者仍然是 1。
+
+    **为什么 Phase D 从未暴露它：Phase D 不启动 Nav2。** 而探索器与
+    `localization_monitor` 各有自己的判据，都不依赖 `map` 这个 TF 是否存在。
+    这正是"一条从未被走过的路径"——与缺陷 8 是同一个模式。
+
+    **排查提示**：`Invalid frame ID "map" ... frame does not exist` 是一句 INFO
+    级别的日志，夹在生命周期启动的一堆输出里。它才是根因，而它长得像背景噪声。
+
+11. **整栈启动脚本只清 TX1、不清 Orin —— 连跑两次会叠成两套**（2026-10-15 修复）。
+    `r680_motion_up.sh` / 初版 `r680_explore_up.sh` 都只在 TX1 侧做清理，
+    Orin 侧直接启动。连跑两次的实测结果：
+
+    | 量 | 单次 | 连跑两次 |
+    |---|---|---|
+    | 节点总数 | 22 | **43** |
+    | `/r680_ros2_relay` | 1 | **3** |
+    | 每个 Nav2 节点 | 1 | **2** |
+
+    后果不是"多几个进程"，而是**两套栈静静地互相打架**：两条 `/cmd_vel_safe`
+    发布者竞争（速度指令交替被覆盖）、两个 `localization_valid` 发布者（标志
+    可能一真一假）、两份 `/scan` 与 `/rtabmap/map`（costmap 收到重复输入）。
+
+    **而没有任何一处会报错。** 验收检查只会显示一行
+    `Publisher count: 2` —— 那是最容易被当成正常的一行。
+
+    这与 `test_safety_monitors.py` 里那 3 个"假失败"是**同一个根因**
+    （两个发布者在同一话题上打架），只是一个在软件测试里，一个在真机上。
+
+    修法：Orin 侧在 source ROS 之后（`ros2 node list` 需要它）先做两轮
+    `safe_kill`（TERM 再 KILL），并**断言清理后节点数为 0**。
    >  `ps` 无输出、日志是旧格式）。括号技巧 `"[r]os1_relay"` 只在**同一条命令里
    >   没有该名字的普通出现**时有效。
 

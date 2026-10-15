@@ -67,6 +67,24 @@ tail -4 /home/wheeltec/relay.log 2>/dev/null
 echo '--- /cmd_vel 现在应该**有**发布者了 ---'
 timeout 8 rostopic info /cmd_vel 2>&1 | head -5" 2>&1 | tail -14
 
+    # odom_frame_id 必须显式设成 relay 实际发布的那个 frame(odom_combined)。
+    #
+    # 留空不是"安全默认",而是致命的:RTAB-Map 要发布 map->odom 这个 TF,
+    # 就必须知道 odom frame 叫什么。空值时它**一个 map->* 的 TF 都不发**,
+    # 于是 map 这个 frame 在整棵 TF 树里根本不存在。
+    #
+    # 后果不是"定位差一点",而是**Nav2 完全起不来**:global_costmap 会一直打印
+    #   Invalid frame ID "map" passed to canTransform argument target_frame
+    # 然后卡住无法激活,lifecycle_manager 的启动顺序被阻塞,于是 bt_navigator、
+    # behavior_server、waypoint_follower 全部停在 inactive —— 只剩
+    # controller_server 是 active。现象是"Nav2 起了一半",根因在一个空字符串。
+    #
+    # Phase D 从未暴露它,因为 Phase D 不启动 Nav2。
+    #
+    # 注意这与"不要开 visual_odometry"是两件不同的事:这里设的是 RTAB-Map
+    # **相信**哪个 frame 是里程计坐标系,不是让它自己算里程计。visual_odometry
+    # 仍然必须是 false,否则 rgbd_odometry 会再发一个 /odom,与 relay 打架。
+
 # ---------------------------------------------------------------- Orin side
 cd "$WS" || exit 1
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
@@ -100,6 +118,7 @@ rm -f "$HOME/.ros/rtabmap_motion.db"
 nohup ros2 launch rtabmap_launch rtabmap.launch.py \
     visual_odometry:=false icp_odometry:=false \
     odom_topic:=/odom frame_id:=base_footprint \
+    odom_frame_id:=odom_combined \
     depth:=true approx_sync:=true \
     rgb_topic:=/camera/camera/color/image_raw \
     depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
