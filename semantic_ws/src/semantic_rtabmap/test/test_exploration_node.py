@@ -25,6 +25,7 @@ from std_msgs.msg import String
 
 from semantic_rtabmap.exploration_node import (
     STATE_COMPLETE,
+    STATE_DRY_RUN_DONE,
     STATE_EXPLORING,
     STATE_IDLE,
     ExplorationNode,
@@ -140,6 +141,46 @@ def test_complete_after_repeated_empty_cycles(node_factory):
     spin_for(node, 1.0)
     assert node._state == STATE_COMPLETE
     assert "no reachable frontier" in node._message
+
+
+def test_dry_run_sweep_reports_dry_run_done_not_complete(node_factory):
+    """A dry-run sweep that runs out of candidates is NOT a completed survey.
+
+    The sweep blacklists each goal it inspects so the next cycle evaluates a
+    different candidate. Once every candidate is blacklisted, empty cycles pile
+    up and the node used to announce COMPLETE / "no reachable frontier" -- a
+    claim about the world that nothing had established, because not a single
+    goal was driven. It also read as a failure during the first Phase F
+    rehearsal. It must be reported as its own state instead.
+
+    The map here deliberately HAS a frontier, which is what separates this case
+    from test_complete_after_repeated_empty_cycles above (no frontier at all,
+    where COMPLETE is the truthful answer).
+    """
+    node = node_factory(
+        autostart=True,
+        dry_run=True,
+        replan_period=0.05,
+        complete_confirmations=2,
+        min_frontier_size=10,
+    )
+    node._on_map(make_grid())  # free middle -> at least one frontier
+    # Deliberately OFF the centre of the free block. A frontier is the closed
+    # ring around a free region, so for a symmetric block the ring's centroid
+    # lands on the block centre -- if the robot stands there too, the goal is
+    # rejected by min_goal_distance (0.4 m) and the cycle reports "no frontier"
+    # even though the whole ring is walkable. Keeping the robot off-centre is
+    # what makes this test exercise the dry-run sweep rather than that effect.
+    node._robot_pose = lambda: (1.5, 1.5, 0.0)
+    spin_for(node, 1.5)
+
+    assert node._dry_run_seen >= 1, "the sweep must have inspected a candidate"
+    assert node._state == STATE_DRY_RUN_DONE
+    assert node._state != STATE_COMPLETE
+    assert "nothing was driven" in node._message
+    # Nothing may have been sent to Nav2, and no goal may count as visited.
+    assert node._goal_handle is None
+    assert node._completed_goals == 0
 
 
 def test_time_budget_aborts_exploration(node_factory):

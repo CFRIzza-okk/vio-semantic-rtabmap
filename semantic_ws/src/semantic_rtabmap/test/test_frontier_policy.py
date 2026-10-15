@@ -18,6 +18,7 @@ from semantic_rtabmap.frontier import (
     Frontier,
     GoalBlacklist,
     GridInfo,
+    _nearest_free_label,
     detect_frontiers,
     estimate_gain,
     frontier_mask,
@@ -214,6 +215,86 @@ def test_reachability_without_robot_pose_keeps_frontiers():
         data, info(21, 21), robot_xy=None, min_size=8, require_reachable=True
     )
     assert frontiers
+
+
+def _free_labels_of(data, threshold=50):
+    """Connected-component labels of the free mask, as detect_frontiers builds them."""
+    from scipy import ndimage
+
+    free, _, _ = occupancy_arrays(data, threshold)
+    labels, _ = ndimage.label(free, structure=np.ones((3, 3), dtype=int))
+    return free, labels
+
+
+def test_nearest_free_label_finds_the_nearest_cell_not_the_first_scanned():
+    """Ring search, so a far cell with a smaller row index must not win.
+
+    Regression guard for _nearest_free_label: a row-major "first free cell"
+    scan would return the cell at row 5 (Chebyshev distance 5, label 1) while
+    the genuinely nearest free cell sits at distance 1 (label 2). Returning the
+    farther one would silently put the robot in the wrong free-space component.
+    """
+    data = blank(21, 21)
+    data[5, 10] = 0     # far, but earlier in scan order -> label 1
+    data[11, 10] = 0    # nearest (distance 1) -> label 2
+    free, labels = _free_labels_of(data)
+    geometry = info(21, 21)
+
+    assert int(labels[5, 10]) == 1, "fixture assumes scan-order labelling"
+    assert int(labels[11, 10]) == 2
+
+    assert _nearest_free_label(labels, 10, 10, geometry, 1.0) == 2
+
+
+def test_nearest_free_label_respects_the_radius_limit():
+    data = blank(21, 21)
+    data[5, 10] = 0
+    _, labels = _free_labels_of(data)
+    geometry = info(21, 21)  # RES = 0.1, so 1.0 m == 10 cells
+
+    # Distance is 5 cells = 0.5 m: inside a 1.0 m search, outside a 0.2 m one.
+    assert _nearest_free_label(labels, 10, 10, geometry, 1.0) == 1
+    assert _nearest_free_label(labels, 10, 10, geometry, 0.2) == 0
+
+
+def test_reachability_filters_when_the_robots_own_cell_is_unknown():
+    """The robot's cell is UNKNOWN on a real map, and the filter must still run.
+
+    Measured on the live map: the robot sits at map (0, 0) and that cell is
+    UNKNOWN, because the forward-facing depth camera never observes the floor
+    directly beneath the base. ndimage.label gives an unknown cell label 0, and
+    the old code read that as "cannot tell" and skipped the whole reachability
+    filter -- so `require_reachable: true` did nothing at all on a fresh map
+    (8 of 8 frontiers passed where only 1 should have).
+    """
+    data = _two_rooms()
+    geometry = info(21, 21)
+
+    # Cell (5, 4) is UNKNOWN (free rows start at 5) and one cell away from the
+    # left room, so the nearest-free-cell proxy must resolve to the left room.
+    free, labels = _free_labels_of(data)
+    robot = geometry.cell_to_world(5, 4)
+    rcx, rcy = geometry.world_to_cell(*robot)
+    assert not free[rcy, rcx], "fixture must place the robot in an UNKNOWN cell"
+    resolved = _nearest_free_label(labels, rcx, rcy, geometry, 1.0)
+    assert resolved > 0, "nearest-free proxy must find the left room"
+    assert resolved == int(labels[5, 5])
+
+    reachable = detect_frontiers(
+        data, geometry, robot_xy=robot, min_size=8, require_reachable=True
+    )
+    everything = detect_frontiers(
+        data, geometry, robot_xy=robot, min_size=8, require_reachable=False
+    )
+
+    assert reachable, "the robot's own room must still offer frontiers"
+    # The robot is in the left room, the wall is at x = 1.0.
+    assert all(f.centroid[0] < 1.0 for f in reachable)
+    assert any(f.centroid[0] > 1.0 for f in everything)
+    assert len(everything) > len(reachable), (
+        "if these are equal the reachability filter was skipped, which is "
+        "exactly the bug this test guards"
+    )
 
 
 # ----------------------------------------------------------------------
