@@ -30,10 +30,18 @@ r680_explorer:
     max_consecutive_failures: 5    # 连续失败上限，达到转 ABORTED
     require_localization: true
     localization_timeout: 1.0
-    # TX1 的 /PowerVoltage 目前没有经过 relay 转发，保持关闭；
-    # 确认消息类型并转发后再设为 /battery_voltage 之类的真实话题。
-    battery_topic: ""
+    # 低电压守卫。TX1 的 /PowerVoltage（std_msgs/Float32，实测 11.90 V）现在
+    # 已经过 relay 转发到 /battery_voltage，所以这里可以打开。
+    #
+    # 不打开这一项的后果不是“少一个提示”，而是**电量耗尽时探索不会停** ——
+    # 这台车已经因为跑没电而让 TX1 断电过一次（整场会话中断）。
+    # 10.5 V 是 3S 锂电的保守下限；低于它转 ABORTED 并停止发速度。
+    battery_topic: /battery_voltage
     min_battery: 10.5
+    # 电压样本的可信时长。超过它就转 ABORTED，而不是继续用陈旧值。
+    # 意义在于覆盖“relay 挂了/TX1 掉线”这种情况：那时 /battery_voltage 不再更新，
+    # 但 self._battery 仍保留最后一次读数，守卫会一直拿它比较并报“正常”。
+    battery_timeout: 5.0
 
     # ---- frontier 选择策略 ----
     # 略大的 min_frontier_size 用来过滤 D435 深度噪声产生的碎片 frontier。

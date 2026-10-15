@@ -19,6 +19,10 @@
     input_cmd_vel: /cmd_vel_safe
     output_odom: /odom
     output_imu: /imu
+    # 由 TX1 的 /PowerVoltage（std_msgs/Float32，实测 11.90 V）转发而来，
+    # 供探索节点的低电压守卫使用（config/r680_exploration.yaml 的 battery_topic）。
+    # 设成空串则不创建发布者 —— 话题干脆不出现，比“话题在但永远不发”更容易发现。
+    output_battery: /battery_voltage
     # TX1's static base_footprint -> camera_link belongs to its old camera.
     # Filter it; Orin publishes the measured D435 extrinsic itself.
     #

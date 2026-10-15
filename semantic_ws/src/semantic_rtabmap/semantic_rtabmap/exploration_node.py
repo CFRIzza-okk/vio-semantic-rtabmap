@@ -84,6 +84,10 @@ class ExplorationNode(Node):
         self.declare_parameter("localization_timeout", 1.0)
         self.declare_parameter("battery_topic", "")
         self.declare_parameter("min_battery", 10.5)
+        # How long a battery sample stays trustworthy. TX1's /PowerVoltage is
+        # low-rate (a few Hz), so this is generous -- it is meant to catch a dead
+        # relay or a dropped link, not normal jitter.
+        self.declare_parameter("battery_timeout", 5.0)
 
         # --- frontier policy --------------------------------------------
         self.declare_parameter("min_frontier_size", 8)
@@ -299,6 +303,26 @@ class ExplorationNode(Node):
 
         if self._battery is not None:
             minimum = float(self.get_parameter("min_battery").value)
+            battery_timeout = float(self.get_parameter("battery_timeout").value)
+            age = now - self._battery_stamp
+            # A reading that has stopped arriving must not be treated as a current
+            # one. `_battery_stamp` was already being recorded here but never read,
+            # so a relay that died mid-run left the guard comparing against the
+            # last voltage it ever saw -- possibly minutes old -- and reporting
+            # "fine". That is the same silent-failure shape as the other defects
+            # in this project: the sensor is dead, the system looks healthy.
+            #
+            # Stale is NOT the same as low, so this aborts rather than silently
+            # continuing: an autonomous run that cannot see its own battery has
+            # lost the protection it was relying on.
+            if age > battery_timeout:
+                self._cancel_goal()
+                self._set_state(
+                    STATE_ABORTED,
+                    "battery reading stale: last sample %.1f s ago (limit %.1f s)"
+                    % (age, battery_timeout),
+                )
+                return
             if self._battery < minimum:
                 self._cancel_goal()
                 self._set_state(

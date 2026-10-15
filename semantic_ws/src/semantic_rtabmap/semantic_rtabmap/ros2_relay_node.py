@@ -13,6 +13,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Float32
 from tf2_msgs.msg import TFMessage
 
 # /tf_static 必须是 TRANSIENT_LOCAL（latched），/tf 必须保持 VOLATILE —— 两者不能混。
@@ -86,6 +87,7 @@ class Relay(Node):
         self.declare_parameter("input_cmd_vel", "/cmd_vel_safe")
         self.declare_parameter("output_odom", "/odom")
         self.declare_parameter("output_imu", "/imu")
+        self.declare_parameter("output_battery", "/battery_voltage")
         self.declare_parameter("filter_tf_child", "camera_link")
         self.declare_parameter("drop_tf_parent", "base_footprint")
         # 默认 False = 原样转发 TX1 的协方差（见文件上方 PLANAR_COVARIANCE_* 的说明）。
@@ -103,6 +105,15 @@ class Relay(Node):
         self.sock.settimeout(0.2)
         self.odom_pub = self.create_publisher(Odometry, str(self.get_parameter("output_odom").value), 10)
         self.imu_pub = self.create_publisher(Imu, str(self.get_parameter("output_imu").value), 10)
+        # Battery voltage, forwarded from TX1's /PowerVoltage (std_msgs/Float32).
+        # Empty string disables the publisher, so a relay that has no battery
+        # source simply does not advertise the topic -- better than advertising it
+        # and never publishing, which looks identical to a working topic whose
+        # publisher died.
+        self.battery_pub = None
+        battery_topic = str(self.get_parameter("output_battery").value)
+        if battery_topic:
+            self.battery_pub = self.create_publisher(Float32, battery_topic, 10)
         self.tf_pub = self.create_publisher(TFMessage, "/tf", 10)
         self.tf_static_pub = self.create_publisher(TFMessage, "/tf_static", TF_STATIC_QOS)
         self.cmd_sub = self.create_subscription(Twist, str(self.get_parameter("input_cmd_vel").value), self.send_cmd, 10)
@@ -129,9 +140,16 @@ class Relay(Node):
                 kind, p=body["kind"], body["payload"]
                 if kind == "odom": self.publish_odom(p)
                 elif kind == "imu": self.publish_imu(p)
+                elif kind == "battery": self.publish_battery(p)
                 elif kind in ("tf", "tf_static"): self.publish_tf(p, kind == "tf_static")
             except (ValueError, KeyError, TypeError, json.JSONDecodeError):
                 self.get_logger().warning("invalid relay packet")
+    def publish_battery(self,p):
+        # std_msgs/Float32 has no header/stamp, so there is nothing to age-check
+        # on the wire. The receiver timestamps on arrival; the exploration node's
+        # battery guard treats a stale reading as unknown rather than as OK.
+        if self.battery_pub is None: return
+        m=Float32(); m.data=float(p.get("voltage",0.0)); self.battery_pub.publish(m)
     def publish_odom(self,p):
         m=Odometry(); self.header(p["header"],m.header); m.child_frame_id=p.get("child_frame_id","")
         self.vec(p["pose"]["position"],m.pose.pose.position); self.quat(p["pose"]["orientation"],m.pose.pose.orientation)

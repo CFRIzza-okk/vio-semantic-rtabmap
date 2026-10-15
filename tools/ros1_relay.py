@@ -30,6 +30,7 @@ import rospy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Float32
 from tf2_msgs.msg import TFMessage
 
 # py2: time.monotonic() is Python 3.3+. On 2.7 it raises AttributeError, which
@@ -79,6 +80,19 @@ class Relay:
         rospy.Subscriber("/imu", Imu, lambda m: self.send("imu", self.imu(m)), queue_size=10)
         rospy.Subscriber("/tf", TFMessage, lambda m: self.send("tf", self.tf(m)), queue_size=10)
         rospy.Subscriber("/tf_static", TFMessage, lambda m: self.send("tf_static", self.tf(m)), queue_size=10)
+        # Battery voltage. Measured on TX1 2026-10-14: /PowerVoltage is
+        # std_msgs/Float32, published by /wheeltec_robot, ~11.90 V.
+        #
+        # Without this the exploration node's battery guard is inert: its
+        # battery_topic was empty, so min_battery (10.5 V) could never trip and a
+        # long autonomous run would simply drive until the pack died -- which has
+        # already happened once on this robot (TX1 lost power mid-session).
+        #
+        # queue_size=1 is deliberate: only the latest voltage matters, and battery
+        # telemetry is low-rate. A deep queue would just add latency to a value
+        # whose whole purpose is to be current.
+        rospy.Subscriber("/PowerVoltage", Float32,
+                         lambda m: self.send("battery", self.battery(m)), queue_size=1)
         # py2: threading.Thread(daemon=True) is Python 3.3+; on 2.7 it raises
         # "TypeError: __init__() got an unexpected keyword argument 'daemon'"
         # and the node died here, before ever binding its socket.
@@ -105,6 +119,14 @@ class Relay:
         return {"header": cls.header(m.header), "orientation": cls.quat(m.orientation), "orientation_covariance": list(m.orientation_covariance),
                 "angular_velocity": cls.vec(m.angular_velocity), "angular_velocity_covariance": list(m.angular_velocity_covariance),
                 "linear_acceleration": cls.vec(m.linear_acceleration), "linear_acceleration_covariance": list(m.linear_acceleration_covariance)}
+    @classmethod
+    def battery(cls, m):
+        # std_msgs/Float32 carries no header and no stamp, so the receiver cannot
+        # age-check it by timestamp the way it does odom/tf. The ROS 2 side
+        # therefore timestamps on arrival -- see Relay._on_battery -- and the
+        # exploration node must treat a stale battery reading as unknown rather
+        # than as "still fine".
+        return {"voltage": float(m.data)}
     @classmethod
     def tf(cls, m):
         return [{"header": cls.header(t.header), "child_frame_id": t.child_frame_id,

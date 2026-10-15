@@ -43,12 +43,27 @@ say() { printf '\n=== %s ===\n' "$1"; }
 # launch itself, and the verification -- silently never ran. The symptom was an
 # empty step that looked like "no output to report" rather than a failure.
 say "1/6 TX1: stop stale processes"
+# Bracket patterns, and they are load-bearing here.
+#
+# `pkill -f PATTERN` matches the pattern against every process's full command
+# line -- INCLUDING the shell that is running this cleanup, whose command line is
+# the whole script text below. With a plain pattern ("ros1_relay") the shell
+# matches itself, dies at the first pkill, and every later line in this block is
+# silently skipped: the remaining pkills never run and `echo cleaned` never
+# prints. That is exactly what happened, and it is why this step reported no
+# output at all.
+#
+# The bracket form survives that because the shell's command line contains
+# "[r]os1_relay" -- after the `r` comes `]`, so the regex `[r]os1_relay` does not
+# match its own source text. This trick is ONLY safe while no plain occurrence of
+# the name appears in the same command; that is why the driver launch is a
+# separate ssh call (see the note above), where the plain text does appear.
 timeout 60 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
 export ROS_MASTER_URI=http://192.168.2.102:11311
 export ROS_IP=192.168.2.102
-pkill -f "ros1_relay" 2>/dev/null
-pkill -f "wheeltec_robot" 2>/dev/null
-pkill -f "roscore" 2>/dev/null
+pkill -f "[r]os1_relay" 2>/dev/null
+pkill -f "[w]heeltec_robot" 2>/dev/null
+pkill -f "[r]oscore" 2>/dev/null
 sleep 3
 echo "cleaned"' 2>&1 | tail -2
 
@@ -101,7 +116,11 @@ sleep 12
 # `ros2 topic hz | grep` is unreliable here: hz repaints its line with \r and grep
 # buffers, so a working topic can report nothing. Publisher/subscriber counts are
 # deterministic and instant, so use those for the bring-up checks.
-timeout 10 ros2 topic info /scan 2>&1 | head -2
+timeout 10 ros2 topic info /camera/camera/aligned_depth_to_color/image_raw 2>&1 | head -2
+# NOTE: /scan is deliberately NOT checked here. depthimage_to_laserscan belongs to
+# the EXPLORATION launch, not to r680_navigation, so at this point the topic does
+# not exist yet and the check prints "Unknown topic '/scan'" -- which reads like a
+# failure but is only a sequencing mistake. It is verified after step 6, below.
 
 say "6/6 RTAB-Map"
 rm -f "$HOME/.ros/rtabmap_phaseD.db"
@@ -127,6 +146,15 @@ nohup ros2 launch semantic_rtabmap r680_exploration.launch.py \
     > "$TMP/explore.log" 2>&1 &
 sleep 18
 grep -E "explorer ready|localization_valid" "$TMP/explore.log" | tail -3
+
+# /scan and /battery_voltage both come from launches started above, so they can
+# only be checked now. Each MUST show a publisher.
+say "scan + battery (both must have a publisher)"
+echo -n "  /scan:             "; timeout 10 ros2 topic info /scan 2>&1 | grep -i publisher | head -1
+echo -n "  /battery_voltage:  "; timeout 10 ros2 topic info /battery_voltage 2>&1 | grep -i publisher | head -1
+# A live voltage proves the whole chain (TX1 driver -> TX1 relay -> UDP -> ROS 2
+# relay). Without it the exploration node's low-voltage guard is inert again.
+timeout 15 ros2 topic echo --once /battery_voltage 2>&1 | head -2
 
 say "safety gate"
 echo "  TX1 /cmd_vel publishers (MUST be None):"
