@@ -119,15 +119,24 @@ def main():
 
     # --- the run ------------------------------------------------------------
     emit("[3/5] 开始发速度 %.3f m/s ..." % linear_x)
+    emit("      >>> 车现在开始移动，请看着它 <<<")
     t_start = time.time()
     period = 1.0 / RATE_HZ
     sent = 0
+    next_report = t_start + 0.5
     try:
         while time.time() - t_start < seconds:
             node.send(linear_x)
             sent += 1
             rclpy.spin_once(node, timeout_sec=0.01)
             time.sleep(period)
+            # Live progress, so someone watching the robot can line the motion up
+            # with a number instead of guessing afterwards which movement it was.
+            if time.time() >= next_report:
+                next_report += 0.5
+                if node.odom is not None:
+                    emit("      t=%4.1fs  odom x=%+.4f  y=%+.4f   (发送第 %d 条)"
+                         % (time.time() - t_start, node.odom[0], node.odom[1], sent))
     finally:
         # ---- THE IRON RULE: zero immediately, and hold it ----------------
         emit("[4/5] 停止并补零 (持续 %.1f s)" % ZERO_HOLD_S)
