@@ -112,14 +112,28 @@ def test_shipped_ports_are_complementary_with_tx1():
 
 
 def _sign(secret, body):
-    raw = json.dumps(body, separators=(",", ":")).encode()
-    return hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    """Sign exactly the way the relay does -- by CALLING the relay's own code.
+
+    This used to re-implement the canonical form as a bare
+    ``json.dumps(body, separators=(",", ":"))``. When the relay switched to
+    ``sort_keys=True`` (so that Python 2 and Python 3 serialise a dict to the
+    same bytes), this copy silently went stale: the test kept producing a
+    signature the relay no longer computed, every packet was dropped as a
+    signature mismatch, and the failure surfaced as "relay never republished
+    /odom" -- a symptom that points at the network, not at the helper.
+
+    A hand-copied canonical form is a second implementation of a security-
+    relevant function, and it will drift. Import the real one instead, so this
+    test fails for the right reason if the relay's signing changes.
+    """
+    from semantic_rtabmap.ros2_relay_node import Relay
+    return hmac.new(secret.encode(), Relay.canonical(body), hashlib.sha256).hexdigest()
 
 
 def _wrap(secret, kind, payload):
     body = {"kind": kind, "payload": payload}
     return json.dumps({"body": body, "sig": _sign(secret, body)},
-                      separators=(",", ":")).encode()
+                      separators=(",", ":"), sort_keys=True).encode()
 
 
 def _odom_payload():

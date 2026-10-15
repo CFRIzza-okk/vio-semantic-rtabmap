@@ -78,6 +78,31 @@ def _canonical(obj):
     return json.dumps(obj, separators=(",", ":"), sort_keys=True).encode()
 
 
+def _extract_compare_digest_call(src, label):
+    """Pull the real `hmac.compare_digest(...)` call text out of a relay source.
+
+    Located via the AST, then sliced by the node's own line/column span. Two
+    traps this avoids, both of which this test fell into first:
+
+      * `src.find("compare_digest")` hits the occurrence inside the COMMENT that
+        documents the type rules -- extracting `compare_digest(bytes, str)`,
+        which then fails with "unsupported operand type(s): 'type' and 'type'".
+        A plain text search cannot tell code from prose about code.
+      * The call is wrapped across two lines, so a line-based split silently
+        yields half of it and reads as though the relay were broken.
+    """
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "compare_digest"):
+            lines = src.splitlines(keepends=True)
+            start = sum(len(l) for l in lines[:node.lineno - 1]) + node.col_offset
+            end = sum(len(l) for l in lines[:node.end_lineno - 1]) + node.end_col_offset
+            return src[start:end]
+    raise AssertionError("%s relay: no compare_digest call found" % label)
+
+
 # --------------------------------------------------------------------------
 # 1. the failure mode itself, demonstrated on real Python 2
 # --------------------------------------------------------------------------
@@ -142,19 +167,7 @@ def test_valid_cmd_vel_packet_is_accepted_on_python2():
         pytest.skip("python2 not available")
 
     src = TX1_RELAY.read_text()
-    # pull the comparison expression straight out of the source
-    line = None
-    for ln in src.splitlines():
-        if "compare_digest" in ln and "self.sign(raw)" in ln:
-            line = ln.strip()
-            break
-    assert line is not None, (
-        "could not find the TX1 verification expression; it may have been "
-        "restructured and this test needs updating"
-    )
-    # turn `if not hmac.compare_digest(A, B) ...: continue` into a bare comparison
-    expr = line.split("compare_digest", 1)[1].lstrip("(").rsplit(")", 1)[0]
-    expr = "hmac.compare_digest(" + expr + ")"
+    expr = _extract_compare_digest_call(src, "TX1")
 
     script = (
         "import json,hmac,hashlib,sys\n"
@@ -186,11 +199,24 @@ def test_valid_cmd_vel_packet_is_accepted_on_python2():
 # --------------------------------------------------------------------------
 # 3. both sides stay explicit
 # --------------------------------------------------------------------------
-def test_both_sides_encode_the_signature_before_comparing():
+def test_both_sides_encode_BOTH_signatures_before_comparing():
     """A unicode/bytes asymmetry between the two ends is what hid this.
 
-    Structural, not textual: find the compare_digest call and require that its
-    first argument is an .encode(...) call.
+    BOTH operands, not just the received one. The type rules differ by
+    interpreter:
+
+        compare_digest(str,   str)    py2 OK   py3 OK
+        compare_digest(bytes, str)    py2 OK   py3 TypeError
+        compare_digest(bytes, bytes)  py2 OK   py3 OK
+
+    Only (bytes, bytes) works on both, so encoding a single argument is WORSE
+    than encoding neither -- it moves the failure to the other machine. Not
+    theoretical: encoding only the received signature fixed TX1 and broke the
+    Python 3 relay's round trip, which the full suite caught and the first
+    version of this very test had let through.
+
+    Structural, not textual: find each compare_digest call and require .encode()
+    on EVERY argument.
     """
     for path, label in ((TX1_RELAY, "TX1"), (ORIN_RELAY, "Orin")):
         tree = ast.parse(path.read_text())
@@ -202,18 +228,59 @@ def test_both_sides_encode_the_signature_before_comparing():
             if not (isinstance(f, ast.Attribute) and f.attr == "compare_digest"):
                 continue
             found += 1
-            assert node.args, "%s: compare_digest called with no arguments" % label
-            first = node.args[0]
-            ok = (isinstance(first, ast.Call)
-                  and isinstance(first.func, ast.Attribute)
-                  and first.func.attr == "encode")
-            assert ok, (
-                "%s relay line %d passes a non-bytes signature to "
-                "compare_digest. On Python 2 that raises TypeError for unicode "
-                "and every packet is discarded as 'invalid relay packet'."
-                % (label, node.lineno)
-            )
+            assert len(node.args) >= 2, (
+                "%s relay line %d: compare_digest needs two arguments"
+                % (label, node.lineno))
+            for arg in node.args:
+                ok = (isinstance(arg, ast.Call)
+                      and isinstance(arg.func, ast.Attribute)
+                      and arg.func.attr == "encode")
+                assert ok, (
+                    "%s relay line %d passes a non-bytes operand to "
+                    "compare_digest. Python 2 raises TypeError for a unicode "
+                    "argument (discarding every packet); Python 3 raises "
+                    "TypeError when the operands are different types. Only "
+                    "(bytes, bytes) works on both, so BOTH must be encoded."
+                    % (label, node.lineno)
+                )
         assert found > 0, "%s relay: no compare_digest call found" % label
+
+
+def test_the_expression_is_accepted_on_python3():
+    """Drive the real Orin expression on Python 3 and require it to ACCEPT.
+
+    The TX1-side test proves Python 2 accepts; this proves Python 3 still does.
+    Between them, a fix that satisfies only one interpreter cannot pass -- which
+    is the exact shape of the mistake made while fixing the original bug.
+    """
+    src = ORIN_RELAY.read_text()
+    expr = _extract_compare_digest_call(src, "Orin")
+
+    script = (
+        "import hmac, hashlib, json, sys\n"
+        "SECRET = '@SECRET@'\n"
+        "def sign(b): return hmac.new(SECRET.encode(), b, hashlib.sha256).hexdigest()\n"
+        "def canonical(o): return json.dumps(o, separators=(',', ':'), sort_keys=True).encode()\n"
+        "class Self:\n"
+        "    sign = staticmethod(sign)\n"
+        "self = Self()\n"
+        "outer = json.loads(sys.argv[1])\n"
+        "body = outer['body']\n"
+        "raw = canonical(body)\n"
+        "print('OK' if @EXPR@ else 'MISMATCH')\n"
+    ).replace("@SECRET@", SECRET).replace("@EXPR@", expr)
+
+    raw = _canonical(SAMPLE)
+    packet = json.dumps({"body": SAMPLE, "sig": _sign(raw)},
+                        separators=(",", ":"), sort_keys=True)
+
+    r = subprocess.run(["python3", "-c", script, packet],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, (
+        "the Orin verification expression blew up on Python 3 -- mixing bytes "
+        "and str in compare_digest raises TypeError there:\n%s" % r.stderr)
+    assert "OK" in r.stdout, (
+        "the Orin side REJECTED a valid packet on Python 3:\n%s" % r.stdout)
 
 
 def test_generic_handler_does_not_hide_the_cause():

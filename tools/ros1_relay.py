@@ -9,7 +9,20 @@ MUST RUN UNDER PYTHON 2.7
 TX1 is Ubuntu 18.04 / ROS Melodic, whose ``rospy`` is built for Python 2.7
 (``python3 -c "import rospy"`` fails there with ModuleNotFoundError). Use::
 
-    python2 ~/ros1_relay.py _peer_host:=192.168.2.15
+    python2 ~/ros1_relay.py _peer_host:=192.168.2.15 _enable_cmd_vel:=false
+
+ALWAYS PASS ``_enable_cmd_vel`` EXPLICITLY
+------------------------------------------
+Omitting it does NOT mean "off". ROS 1's master keeps a node's private
+parameters after the process exits -- SIGKILL included -- so a relay started
+with no flag silently inherits whatever the previous run left behind, including
+a stale ``true``. That is how the gate once came back OPEN while the operator
+believed it was closed: the documented rollback ("start it without the flag, the
+default is off") was simply false.
+
+Use ``tools/r680_gate.sh`` to change or inspect the gate. It deletes the stale
+parameters first, passes the flag explicitly, and then verifies the result
+against ``/cmd_vel`` rather than trusting the parameter or this file's log.
 
 This file is deliberately kept runnable on **both** Python 2.7 and Python 3,
 but it is only ever executed on Python 2.7. Every construct below that differs
@@ -23,6 +36,7 @@ import json
 import math
 import os
 import socket
+import sys
 import threading
 import time
 
@@ -106,6 +120,48 @@ class Relay:
         self.last_seq = -1
         self.cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=10) if self.enable_cmd_vel else None
         self.zero_cmd = Twist()
+
+        # Say the gate state out loud, every start, in a form that cannot be
+        # skimmed past.
+        #
+        # ROS 1's master PERSISTS a node's private parameters after the process
+        # dies, including after a SIGKILL. So `~enable_cmd_vel` survives from a
+        # previous run, and a relay started with no flag at all inherits whatever
+        # the last one set. The documented rollback -- "restart the relay without
+        # _enable_cmd_vel and the gate is closed by default" -- is therefore
+        # FALSE: with a stale `true` in the master the gate comes back OPEN, and
+        # nothing says so. That is exactly what happened, and it was caught only
+        # by noticing a /cmd_vel publisher that should not have existed.
+        #
+        # The banner makes the effective state visible; tools/r680_gate.sh does
+        # the actual clearing of stale params and verifies the result.
+        #
+        # BOTH states are printed to BOTH channels -- rospy's log file and plain
+        # stderr -- deliberately.
+        #
+        # rospy.loginfo goes only to ~/.ros/log/<node>.log, which nobody reads
+        # during a bring-up, while rospy.logwarn also reaches stderr. Printing
+        # "open" loudly and "closed" quietly is the wrong asymmetry for a safety
+        # state: silence would mean either "closed" or "the banner never ran",
+        # and those are exactly the two cases you must be able to tell apart.
+        # stderr is unbuffered, so the redirected relay.log always has it.
+        banner = [
+            "=" * 62,
+            ("MOTION GATE OPEN -- this relay publishes /cmd_vel"
+             if self.enable_cmd_vel else
+             "MOTION GATE CLOSED -- no /cmd_vel publisher is created"),
+        ]
+        if self.enable_cmd_vel:
+            banner.append("  limits: linear.x=%.3f linear.y=%.3f angular.z=%.3f"
+                          % (self.max_linear_x, self.max_linear_y, self.max_angular_z))
+            banner.append("  close it with: tools/r680_gate.sh close")
+        else:
+            banner.append("  (odom/imu/tf/battery forwarding is unaffected)")
+        banner.append("=" * 62)
+        for line in banner:
+            rospy.logwarn(line) if self.enable_cmd_vel else rospy.loginfo(line)
+            sys.stderr.write(line + "\n")
+        sys.stderr.flush()
         rospy.Subscriber("/odom", Odometry, lambda m: self.send("odom", self.odom(m)), queue_size=10)
         rospy.Subscriber("/imu", Imu, lambda m: self.send("imu", self.imu(m)), queue_size=10)
         rospy.Subscriber("/tf", TFMessage, lambda m: self.send("tf", self.tf(m)), queue_size=10)
@@ -186,24 +242,33 @@ class Relay:
                 # _canonical(): re-serialising with the interpreter's own dict
                 # order would produce different bytes.
                 raw = _canonical(body)
-                # .encode("ascii") is NOT decoration -- without it every downlink
-                # packet is discarded.
+                # Encode BOTH operands. This is not decoration.
                 #
-                # json.loads() hands back `unicode` on Python 2, while
-                # sign() returns a `str` hexdigest. Python 2's
-                # hmac.compare_digest() requires two byte strings and raises
-                # "TypeError: 'unicode' does not have the buffer interface" for a
-                # unicode argument -- for EVERY packet, however valid. The
-                # except below swallowed that TypeError into the same generic
-                # warning as a bad signature, so the symptom was one throttled
-                # "invalid relay packet" line every five seconds, with valid
-                # cmd_vel payloads and growing sequence numbers right there in
-                # the log, and a robot that never moved.
+                # json.loads() hands back `unicode` on Python 2, while sign()
+                # returns a `str` hexdigest. Python 2's hmac.compare_digest()
+                # requires byte strings and raises
+                #   TypeError: 'unicode' does not have the buffer interface
+                # for a unicode argument -- for EVERY packet, however valid. The
+                # except below then folded that TypeError into the same generic
+                # warning as a bad signature, so a total downlink outage looked
+                # like one throttled "invalid relay packet" line every five
+                # seconds, with valid cmd_vel payloads and growing sequence
+                # numbers sitting right there in the log, and a robot that never
+                # moved.
                 #
-                # The uplink never hit this: its verifier runs on Python 3, whose
-                # compare_digest() accepts str. One more asymmetry that let the
-                # bug live.
-                if not hmac.compare_digest(outer["sig"].encode("ascii"), self.sign(raw)) \
+                # Both operands, not just the received one, because the type rules
+                # differ by interpreter:
+                #
+                #   compare_digest(str,   str)    py2 OK   py3 OK
+                #   compare_digest(bytes, str)    py2 OK   py3 TypeError
+                #   compare_digest(bytes, bytes)  py2 OK   py3 OK
+                #
+                # (bytes, bytes) is the only combination valid on BOTH, and
+                # encoding a single argument broke the Python 3 side of this very
+                # relay. On Python 2, str.encode("ascii") still yields str, so the
+                # pair stays valid here too.
+                if not hmac.compare_digest(outer["sig"].encode("ascii"),
+                                           self.sign(raw).encode("ascii")) \
                         or body.get("kind") != "cmd_vel": continue
                 if not self.enable_cmd_vel: continue
                 seq = int(body.get("seq", -1))

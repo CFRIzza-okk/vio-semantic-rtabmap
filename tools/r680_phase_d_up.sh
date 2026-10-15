@@ -81,10 +81,17 @@ echo "--- driver log tail ---"
 tail -3 /home/wheeltec/driver.log 2>/dev/null' 2>&1 | tail -14
 
 say "2/6 TX1 relay"
+# _enable_cmd_vel:=false is passed EXPLICITLY, not omitted.
+#
+# ROS 1's master persists a node's private parameters after the process dies, so
+# a relay started with no flag inherits whatever the previous run set -- including
+# a leftover `true`. Omitting the flag therefore does NOT close the gate; it only
+# hides which state you are in. Phase D must never be able to move the robot, so
+# say it explicitly. Use tools/r680_gate.sh status to verify the real state.
 timeout 80 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
 export ROS_MASTER_URI=http://192.168.2.102:11311
 export ROS_IP=192.168.2.102
-nohup python2 /home/wheeltec/ros1_relay.py _peer_host:=192.168.2.15 > /home/wheeltec/relay.log 2>&1 &
+nohup python2 /home/wheeltec/ros1_relay.py _peer_host:=192.168.2.15 _enable_cmd_vel:=false > /home/wheeltec/relay.log 2>&1 &
 sleep 6
 echo "--- relay pid ---"
 ps -eo pid,args | grep "ros1_relay" | grep -v grep | head -2

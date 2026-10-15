@@ -159,17 +159,23 @@ class Relay(Node):
             except OSError: return
             try:
                 outer=json.loads(packet.decode()); body=outer["body"]; raw=self.canonical(body)
-                # Encode to bytes explicitly. Python 3 tolerates
-                # compare_digest(str, str) while the string is pure ASCII, so
-                # this side works either way -- but the TX1 verifier runs on
-                # Python 2, where compare_digest() raises TypeError for a unicode
-                # argument ("'unicode' does not have the buffer interface") even
-                # though json.loads() always returns unicode there. That
-                # TypeError was caught by the generic handler and reported as
-                # "invalid relay packet", silently discarding every cmd_vel.
-                # Keeping both sides explicit stops the interpreter asymmetry
-                # from being the only thing between this and a repeat.
-                if not hmac.compare_digest(outer["sig"].encode("ascii"), self.sign(raw)): continue
+                # Encode BOTH operands. Encoding only one is worse than encoding
+                # neither, and the type rules are what make that true:
+                #
+                #   compare_digest(str,   str)    py2 OK   py3 OK
+                #   compare_digest(bytes, str)    py2 OK   py3 TypeError
+                #   compare_digest(bytes, bytes)  py2 OK   py3 OK
+                #
+                # (bytes, bytes) is the only combination valid on BOTH
+                # interpreters, so both sides encode both arguments. Encoding just
+                # the received signature broke this side immediately.
+                #
+                # The original bug was on TX1: Python 2's compare_digest raises
+                # "'unicode' does not have the buffer interface" for the unicode
+                # that json.loads always returns there, so every downlink cmd_vel
+                # was discarded and reported as a generic "invalid relay packet".
+                if not hmac.compare_digest(outer["sig"].encode("ascii"),
+                                           self.sign(raw).encode("ascii")): continue
                 kind, p=body["kind"], body["payload"]
                 if kind == "odom": self.publish_odom(p)
                 elif kind == "imu": self.publish_imu(p)

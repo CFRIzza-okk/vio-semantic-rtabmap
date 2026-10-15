@@ -50,8 +50,12 @@ echo recorded" > /dev/null 2>&1 &
 sleep 4
 
 # ---- 发脉冲 ----
+# `-w 1` waits for a matching subscription before publishing. Without it the
+# publish window races ROS 2 discovery: a 2 s burst can expire before the
+# subscriber is connected, the whole pulse vanishes, and the result reads as
+# "the command had no effect" when in fact it was never sent.
 echo "=== 发脉冲 ==="
-timeout "$SECS" ros2 topic pub -r 10 /cmd_vel_nav geometry_msgs/msg/Twist "$CMD" > /dev/null 2>&1
+timeout "$SECS" ros2 topic pub -r 10 -w 1 /cmd_vel_nav geometry_msgs/msg/Twist "$CMD" > /dev/null 2>&1
 echo "  脉冲结束，立刻补零速"
 ros2 topic pub --once /cmd_vel_nav geometry_msgs/msg/Twist "$ZERO" > /dev/null 2>&1
 ros2 topic pub --once /cmd_vel_nav geometry_msgs/msg/Twist "$ZERO" > /dev/null 2>&1

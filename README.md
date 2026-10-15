@@ -136,6 +136,78 @@ relay 脚本在 `tools/ros1_relay.py`，部署与排障说明见 [tools/README_R
    位置差 15 mm 严重**。守卫：`test/test_r680_sensor_and_map_wiring.py` 中断言
    frame 名不得以 `_optical_frame` 结尾。
 
+8. **下行 `cmd_vel` 被 100% 丢弃：Python 2 的 `compare_digest` 拒绝 unicode**
+   （2026-10-15 发现并修复）。第一次真车运动时**车完全不动**，而所有监控指标都
+   健康：建图正常、里程计正常、`localization_valid=true`、`obstacle_stop=false`、
+   TX1 侧甚至能看到**内容完全正确**的 `cmd_vel` 包（`seq` 一路涨到 5875）。
+
+   根因是一行看起来毫无问题的代码：
+
+   ```python
+   hmac.compare_digest(outer["sig"], self.sign(raw))
+   ```
+
+   ```
+   TypeError: 'unicode' does not have the buffer interface
+   ```
+
+   在 Python 2 上，`json.loads` 返回的 `outer["sig"]` **永远是 `unicode`**，而
+   `sign()` 返回 `str` hexdigest，而 **Python 2 的 `hmac.compare_digest` 要求两个
+   参数都是字节串**。于是**每一个**下行包都在校验这一步抛错。
+
+   而它被 `except (ValueError, KeyError, TypeError)` 吞成一句泛化的
+   `invalid relay packet`，与"JSON 畸形""签名错误"无法区分 —— 一次**完整的通信
+   中断**被伪装成了网络背景噪声。这个诊断句本身就是缺陷的一部分，现已改为带
+   **异常类型 + 报文前 200 字节**。
+
+   **为什么能藏这么久：上下行不对称。** 上行（TX1→Orin）的验证方是 Python 3，
+   `compare_digest` 接受 `str`，一直正常；只有下行 100% 失败。这与缺陷 3、7 是
+   同一个形状 —— **两个解释器/两个坐标系之间的不对称，是这类缺陷的藏身之处。**
+
+   而它此前从未被发现，是因为**这条路径从未被执行过**：Phase C/D 全是只读上行，
+   Phase D 的定义就是"只选点不运动"。
+
+   修法：两侧都显式 `.encode("ascii")` 后再比较。Orin 侧虽然能工作，但它依赖
+   "sig 恰好是纯 ASCII"的隐含前提，且不对称本身就是 bug 的温床，故一并显式化。
+
+   守卫：`test/test_relay_python2_compare_digest.py`（4 项）**在真实的 `python2`
+   上驱动 relay 源码里的校验表达式**，而不是只做文本检查。变异测试 4/4 抓到。
+
+9. **运动闸门"关不掉"：ROS 1 master 保留残留私有参数**（2026-10-15 发现并修复）。
+   给车充电时按文档"不带 `_enable_cmd_vel` 重启 relay（默认就是关）"操作，**结果
+   `/cmd_vel` 仍然有发布者** —— 闸门实际是**开的**。
+
+   **ROS 1 的 master 会保留节点退出后的私有参数**（`SIGKILL` 也一样）。所以：
+
+   1. 开闸启动 relay → master 存下 `enable_cmd_vel = true`
+   2. 杀掉 relay
+   3. **不带参数**重启 → 新进程同名节点读到**残留的 `true`**
+   4. **闸门是开的，而操作者以为它是关的** —— 没有任何提示
+
+   **这条已写进计划文档的安全回滚是假的。** 它的危险性在于：真出事时有人照着它去
+   关闸门，会以为关了。
+
+   修法：`tools/r680_gate.sh open|close|status` —— 先**删掉** relay 的全部私有参数
+   （让残留值不可能被继承），启动时**显式**传标志，然后**校验 `/cmd_vel` 的真实
+   发布者列表**。最后一步才是判决性的：它问 master"现在到底是什么在驱动底盘"，
+   而不是相信参数、日志或脚本的意图。任何不符即**强制关闸**，宁可让车不能动，
+   也不留一个说不清的状态。relay 启动时也会**大声打印**闸门状态（开/关都打印），
+   因为原故障的表现形式就是沉默。
+
+   守卫：`test/test_motion_gate_safety.py`（9 项），含"所有启动路径必须显式传
+   闸门标志"与"Phase D 绝不能开闸"。
+
+   > **顺带记两个会导致误判的测量陷阱**（不影响产品代码，但会浪费排查时间）：
+   >
+   > - **`ros2 topic pub -r 10` 会和 ROS 2 发现过程竞争**。2 秒的短脉冲可能整段在
+   >   发现完成前结束，指令**根本没发出去**，现象却像"发了但没效果"（表现为
+   >   `cmd_vel_safety` 只有孤立的 `motion output: ok`，0.5 秒后就是
+   >   `cmd_vel_timeout`）。**必须加 `-w 1`** 等待匹配订阅者。
+   > - **TX1 侧的清理与启动必须分成两次 ssh 调用**。写在同一条命令里时，`pkill`
+   >   的模式会匹配到承载它的那个 shell 自己，shell 在启动行执行前就死了（现象：
+   >  `ps` 无输出、日志是旧格式）。括号技巧 `"[r]os1_relay"` 只在**同一条命令里
+   >   没有该名字的普通出现**时有效。
+
 > 实测补充（2026-10-13）：TX1 的 `static_transform_publisher` 节点发的是 **`/tf`**，
 > 不是 `/tf_static`；TX1 的 `/tf_static` 只有 `robot_state_publisher` 发出的一条**空**消息
 > （URDF 里没有 static joint）。所以 relay 的静态通路上**无物可转**——QoS 修好只是让它
