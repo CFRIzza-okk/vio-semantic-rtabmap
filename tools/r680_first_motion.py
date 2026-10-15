@@ -177,21 +177,31 @@ def main():
 
     # --- verdict ------------------------------------------------------------
     # The point of this test is the wheel-direction question that E0 would have
-    # answered. A large negative dx means the base drives backwards for a
-    # positive x command; near-zero travel with a non-zero command means the
-    # chain is broken somewhere.
+    # answered: does the base move the way a positive x command says it should?
+    #
+    # The comparison must be SIGN AGAINST SIGN, not sign against zero. An earlier
+    # version tested `dx < 0` and called it "wheels are inverted" -- which is
+    # simply wrong when the command itself was negative. A backward command
+    # producing a backward displacement is correct behaviour, and that version
+    # reported it as a failure. What actually indicates an inverted base is a
+    # displacement whose sign is OPPOSITE to the command's.
+    commanded = linear_x
     if dist < 0.005:
         emit("  判定: ✗ 几乎没有移动 —— 指令没有到达底盘，或底盘没响应")
         emit("        查 /safety/stop_reason、TX1 relay 日志、/cmd_vel_safe 是否有数据")
         verdict = 4
-    elif dx < 0:
-        emit("  判定: ✗ 向后退了 (dx=%.4f < 0) —— 轮子方向相反，需修正后再测" % dx)
+    elif commanded != 0.0 and dx * commanded < 0:
+        emit("  判定: ✗ 位移方向与指令相反 (指令 %+.3f, dx=%+.4f)"
+             % (commanded, dx))
+        emit("        —— 底盘符号相反，必须先修正，绝不能进自主探索")
         verdict = 5
-    elif dist > expected * 2.5:
-        emit("  判定: ! 走得比预期远得多 (比值 %.2f) —— 检查限速与编码器标定" % (dist / expected))
+    elif dist > abs(expected) * 2.5:
+        emit("  判定: ! 走得比预期远得多 (比值 %.2f) —— 检查限速与编码器标定"
+             % (dist / abs(expected)))
         verdict = 6
     else:
-        emit("  判定: ✓ 正向移动，位移与预期同量级 (比值 %.2f)" % (dist / expected))
+        emit("  判定: ✓ 位移方向与指令一致 (%+.3f -> dx=%+.4f)，比值 %.2f"
+             % (commanded, dx, dist / abs(expected)))
         verdict = 0
 
     emit("")
