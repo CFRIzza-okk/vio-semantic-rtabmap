@@ -45,6 +45,30 @@
 #    /semantics/map_markers    语义物体标记（桌子/微波炉那些）
 #    /tf  /tf_static           坐标轴
 #
+#  ⚠ 先澄清一个常见误解：本脚本**不需要**为任何话题做“加入转发”的配置。
+#    foxglove_bridge 的默认 topic_whitelist 就是 [".*"]，即**所有话题一律转发**，
+#    包括后加的 /battery_voltage、/safety/*、/cmd_vel_*、/scan、/exploration/*。
+#    所以新话题在 Foxglove 里看不见，原因一定是“面板里没有添加这个频道”，
+#    而不是“bridge 没转发它”。真正要做的事是在下面这份清单里挑，然后在
+#    Foxglove Studio 的 3D / Plot 面板里手动加频道。
+#
+#  R680 麦轮车 / 自主探索（Fixed Frame 建议设 map）：
+#    /scan                      深度转出的激光扫描 —— 看障碍点是否贴住墙线
+#    /odom                      轮式里程计（与 /tf 里 map->odom 对比看漂移）
+#    /battery_voltage           TX1 电池电压，std_msgs/Float32 ⚠ 见下
+#    /cmd_vel_nav               Nav2 控制器/行为树的原始输出（未经限速）
+#    /cmd_vel_safe              安全节点限速后的速度 —— 真正发给底盘的那个
+#    /safety/obstacle_stop      障碍停机（bool，true=停）
+#    /safety/localization_valid 定位是否有效（bool）
+#    /safety/stop_reason        停机原因字符串 —— **车不动时先看这个**
+#    /exploration/status        探索状态，含被拒绝目标的原因
+#    /exploration/goal          当前目标点（geometry_msgs/PoseStamped）
+#
+#  ⚠ /battery_voltage 是裸 std_msgs/Float32，**没有 header、没有时间戳**。
+#    Foxglove 只能拿“收到消息的时刻”当横轴，所以曲线在时间轴上会有抖动，
+#    数值本身是准的（实测 11.86 V）。它请用 Plot 面板看，不要去 3D 面板里找 ——
+#    没有 frame 的消息在 3D 视图里无处安放。
+#
 #  ⚠ 注意：RViz 配置里那几个 rtabmap 专用显示（MapCloud / MapGraph）在
 #    Foxglove 里**显示不出来** —— 它们用的是 rtabmap 自己的插件和自定义
 #    消息类型（rtabmap_msgs/MapData、MapGraph），Foxglove 不认识。
