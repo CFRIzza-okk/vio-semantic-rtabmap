@@ -79,7 +79,7 @@ cd ~/VIO
 ./start_foxglove.sh
 ```
 
-On another computer on the same local network, open the Foxglove Studio desktop application and connect to the address printed by the script, for example `ws://192.168.1.8:8765`. Set the Fixed Frame of Foxglove's 3D panel to `map`. The following topics can be added:
+On another computer on the same local network, open the Foxglove Studio desktop application and connect to the address printed by the script, for example `ws://192.168.5.4:8765`. Set the Fixed Frame of Foxglove's 3D panel to `map`. The following topics can be added:
 
 - `/rtabmap/cloud_map`: global 3D point-cloud map (primary display);
 - `/rtabmap/map`: 2D occupancy grid;

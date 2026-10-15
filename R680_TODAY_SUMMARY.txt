@@ -1,0 +1,795 @@
+R680 / TX1 麦轮小车自主探索项目
+今日工作总结、已确认事实与明日计划
+日期：2026-10-11
+
+============================================================
+一、项目目标
+============================================================
+
+将现有 ROS 2 Humble + D435 + RTAB-Map 语义建图项目，接入 TX1 上的 ROS 1 Melodic Wheeltec R680 麦轮底盘，最终形成：
+
+  TX1 ROS 1 底盘与里程计
+          ↓ ROS 1/ROS 2 数据桥
+  ROS 2 D435 + RTAB-Map + Nav2 + 探索器
+          ↓ 安全速度仲裁
+  TX1 ROS 1 /cmd_vel
+
+最终自主探索链路计划为：
+
+  RTAB-Map 地图
+      ↓
+  Nav2 costmap / planner
+      ↓
+  探索目标选择器
+      ↓
+  /cmd_vel_nav
+      ↓
+  ROS 2 安全仲裁
+      ↓
+  /cmd_vel_safe
+      ↓
+  ROS 1/ROS 2 relay
+      ↓
+  TX1 /cmd_vel
+
+今天没有启动 Nav2、自主探索，也没有通过 relay 向小车发送运动命令。
+
+============================================================
+二、设备、系统与网络事实
+============================================================
+
+1. TX1 / Wheeltec 小车
+
+  用户名：wheeltec
+  ROS：ROS 1 Melodic
+  已确认地址/ROS 配置：
+
+    ROS_MASTER_URI=http://192.168.2.102:11311
+    ROS_IP=192.168.2.102
+    unset ROS_HOSTNAME
+
+  注意：TX1 的 ROS master 就在 TX1 本机，因此这里的地址
+  是 TX1 自己的有线地址。
+  该配置已写入 TX1 的 ~/.bashrc（原来误写为 192.168.0.103）。
+
+  每次使用 TX1 ROS 命令前必须执行：
+
+    source /opt/ros/melodic/setup.bash
+    source /home/wheeltec/wheeltec_robot/devel/setup.bash
+
+  已确认 TX1 运行节点：
+
+    /base_to_camera
+    /base_to_gyro
+    /base_to_laser
+    /base_to_link
+    /joint_state_publisher
+    /robot_pose_ekf
+    /robot_state_publisher
+    /rosout
+    /wheeltec_robot
+
+2. ROS 2 主机
+
+  设备：Jetson Orin NX Super / yahboom
+  ROS：ROS 2 Humble
+  ROS_DOMAIN_ID=99
+  已知地址：
+
+    192.168.5.4    （WiFi，SSID Innovation_Lab，网关 192.168.5.1）
+    192.168.2.15   （有线 eno1，机器人链路）
+
+  主要使用地址：192.168.5.4
+  Docker xtkz 使用 host 网络模式。
+
+  注意：WiFi 已更换。旧 WiFi 为 SSID XTKZ / 192.168.1.16，
+  本文件中凡涉及 192.168.1.x 的段落均为当次排查的历史记录，
+  不代表当前网络。
+
+3. D435
+
+  D435 连接在 ROS 2 主机，不在 TX1。
+  USB 已确认：
+
+    Intel RealSense D435
+    USB ID 8086:0b07
+
+  ROS 2 节点：/camera/camera
+  RealSense ROS 版本：4.58.4
+  LibRealSense 版本：2.58.4
+  固件：5.11.11.100
+  设备序列号：938422075341
+
+4. Docker 环境
+
+  xtkz：ros:noetic
+  ROS_DISTRO=noetic
+  ROS_VERSION=1
+  只有 /opt/ros/noetic，没有 ROS 2 和 ros1_bridge。
+
+  vio-d435-rtabmap:humble：
+    ROS 2 Humble
+    realsense2_camera
+    rtabmap_slam
+    没有 ROS 1 环境，也没有 ros1_bridge。
+
+  宿主机 apt 中也没有可直接使用的 ros-humble-ros1-bridge 包。
+
+============================================================
+三、TX1 ROS 1 已确认话题与频率
+============================================================
+
+TX1 rostopic list 已确认：
+
+  /PowerVoltage
+  /cmd_vel
+  /imu
+  /joint_states
+  /odom
+  /robot_pose_ekf/odom_combined
+  /rosout
+  /rosout_agg
+  /tf
+  /tf_static
+
+话题类型：
+
+  /odom       nav_msgs/Odometry
+  /imu        sensor_msgs/Imu
+  /cmd_vel    geometry_msgs/Twist
+  /robot_pose_ekf/odom_combined
+              geometry_msgs/PoseWithCovarianceStamped
+
+频率：
+
+  /odom：约 20 Hz
+  /imu：约 20 Hz
+  /tf：约 70 Hz（多个发布者合计）
+
+/odom 的 frame：
+
+  header.frame_id: odom_combined
+  child_frame_id: base_footprint
+
+数据发布者：
+
+  /wheeltec_robot 发布 /odom 和 /imu
+  /robot_pose_ekf 订阅 /odom 和 /imu，并发布 /robot_pose_ekf/odom_combined 和动态 /tf
+
+robot_pose_ekf 参数：
+
+  base_footprint_frame: base_footprint
+  freq: 30.0
+  imu_used: true
+  odom_used: true
+  output_frame: odom_combined
+  sensor_timeout: 2.0
+  vo_used: false
+
+第一阶段建议桥接：
+
+  ROS 1 /odom      → ROS 2 /odom
+  ROS 1 /imu       → ROS 2 /imu
+  ROS 1 /tf        → ROS 2 /tf
+  ROS 1 /tf_static  → ROS 2 /tf_static
+
+不建议直接把 /robot_pose_ekf/odom_combined 当作 RTAB-Map odometry 输入，因为其类型是 PoseWithCovarianceStamped，不是 nav_msgs/Odometry。
+
+============================================================
+四、TX1 TF 已确认事实
+============================================================
+
+确认的 TF 主树：
+
+  odom_combined
+  └── base_footprint
+      ├── base_link
+      ├── laser
+      ├── camera_link
+      └── gyro_link
+
+  base_link
+  ├── left_front_link
+  ├── right_front_link
+  ├── left_wheel_link
+  └── right_wheel_link
+
+实测静态变换：
+
+  base_footprint → base_link
+    x=0, y=0, z=0
+    roll=0, pitch=0, yaw=0
+
+  base_footprint → camera_link
+    x=0.120, y=0, z=0.150
+    roll=0, pitch=0, yaw=0
+
+  base_footprint → laser
+    x=0.060, y=0, z=0.200
+    yaw≈3.140 rad（约 180 度）
+
+  base_footprint → gyro_link
+    x=0, y=0, z=0
+
+注意：TX1 的 camera_link 是 Wheeltec 原车模型中的 frame。D435 在 ROS 2 主机上，所以不能默认认为 TX1 的 camera_link 就是 D435 实际安装外参。
+
+已经确认必须避免两个来源同时发布同一段 TF，特别是：
+
+  odom_combined → base_footprint
+  base_link → camera_link
+
+============================================================
+五、底盘运动与里程计测试结论
+============================================================
+
+1. 前进测试
+
+发送 linear.x=0.05 m/s 后，/odom/twist/twist/linear 约为：
+
+  x≈0.042–0.054 m/s
+  y≈-0.001–0.003 m/s
+  z=0
+
+结论：前进指令有效，/odom 能反映前进速度。
+
+2. 横移测试
+
+发送 linear.y=0.05 后，/odom 显示大约：
+
+  x≈0.020–0.033 m/s
+  y≈0.020–0.034 m/s
+
+用户确认实际运动存在打滑和扭动。因此麦轮横移存在明显 x/y 耦合，后续要做底盘/轮胎/地面和里程计标定。目前不应把横移精度当作已验证通过。
+
+3. 原地旋转测试
+
+第一次 angular.z=0.1 太慢，10 条消息不能覆盖有效旋转过程。
+随后使用 angular.z=0.5，监视 60 条 /odom angular 结果：
+
+  起步约 0.199 → 0.66 rad/s
+  稳定大约 0.45–0.56 rad/s
+
+结论：原地旋转指令有效，/odom angular.z 能正确反映旋转；旋转测试通过。
+
+安全要求：任何连续 /cmd_vel 发布按 Ctrl-C 后，必须立即执行：
+
+  rostopic pub -1 /cmd_vel geometry_msgs/Twist \
+  '{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
+
+============================================================
+六、时间同步事实
+============================================================
+
+TX1 最初时间为 2023-08-27，ROS 2 主机为 2026-10-11，差约 3 年。
+后来通过 SSH 使用密码 dongguan，已把 TX1 UTC 时间临时设置到与 ROS 2 主机接近的时间。
+
+校准后验证：
+
+  TX1 /odom stamp 已变为约 179171....
+  主机和 TX1 时间差测得约 0.58 秒
+
+TX1 当前时区：
+
+  Asia/Chongqing
+  CST +0800
+
+TX1 timedatectl 曾显示：
+
+  System clock synchronized: no
+  systemd-timesyncd.service active: yes
+  RTC time: 2000 年附近
+
+结论：当前只是手动临时校时，TX1 重启后可能再次错误。后续必须配置可靠的 chrony/NTP，并再次检查两台机器 date +%s。
+
+============================================================
+七、D435 已确认事实
+============================================================
+
+D435 ROS 2 话题已确认：
+
+  /camera/camera/color/image_raw
+  /camera/camera/color/camera_info
+  /camera/camera/aligned_depth_to_color/image_raw
+  /camera/camera/aligned_depth_to_color/camera_info
+  /camera/camera/depth/image_rect_raw
+  /camera/camera/depth/camera_info
+  /camera/camera/extrinsics/depth_to_color
+  /tf_static
+
+彩色和对齐深度约 27–28 Hz（部分检查时受终端负载波动到约 20–26 Hz）。
+图像分辨率：640×480。
+
+彩色相机内参确认：
+
+  frame_id: camera_color_optical_frame
+  fx≈598.7568
+  fy≈598.7569
+  cx≈326.3443
+  cy≈250.2449
+  distortion_model: plumb_bob
+
+D435 默认内部 TF：
+
+  camera_link → camera_depth_frame
+    平移约 0，旋转单位四元数
+  camera_depth_frame → camera_depth_optical_frame
+  camera_link → camera_color_frame
+    x≈-0.00210885, y≈0.01522173, z≈0.00001623
+  camera_color_frame → camera_color_optical_frame
+
+尝试 tf_prefix:=d435 的结果：
+
+  TF frame 变成 d435camera_link、d435camera_color_frame 等（没有自动插入下划线）
+  但 camera_info.header.frame_id 仍是 camera_color_optical_frame
+
+因此 TF 与 camera_info frame 不一致，不能采用 tf_prefix:=d435 方案。
+测试后 D435 已恢复默认 frame 名称。
+
+当前建议：
+
+  不桥接 TX1 的 base_footprint → camera_link 原车静态 TF；
+  保留 D435 默认 camera_link 内部 TF；
+  由 ROS 2 侧根据真实测量值发布 base_link → camera_link。
+
+============================================================
+八、已修改/新增项目文件
+============================================================
+
+1. semantic_ws/src/semantic_rtabmap/semantic_rtabmap/cmd_vel_safety_node.py
+
+   ROS 2 安全速度仲裁节点：
+   - /cmd_vel_nav → /cmd_vel_safe
+   - 急停优先
+   - 障碍停车
+   - 定位健康/超时停车
+   - 指令超时停车
+   - x/y/z 和角速度限幅
+   - /safety/stop_reason
+
+2. semantic_ws/src/semantic_rtabmap/semantic_rtabmap/ros2_relay_node.py
+
+   ROS 2 UDP relay：
+   - 接收 TX1 /odom、/imu、/tf、/tf_static
+   - 发布 ROS 2 对应话题
+   - 订阅 /cmd_vel_safe
+   - 通过 HMAC-SHA256 验证命令
+   - 命令序号防重放
+   - 过滤 base_footprint → camera_link
+
+3. semantic_ws/src/semantic_rtabmap/launch/r680_navigation.launch.py
+4. semantic_ws/src/semantic_rtabmap/launch/r680_relay.launch.py
+5. semantic_ws/src/semantic_rtabmap/config/r680_navigation.yaml
+6. semantic_ws/src/semantic_rtabmap/config/r680_relay.yaml
+7. tools/ros1_relay.py
+
+   ROS 1 TX1 侧 relay：
+   - 发布 TX1 传感器数据到 UDP
+   - 接收经过认证的 cmd_vel
+   - sequence 防重放
+   - x/y/角速度二次限幅
+   - 0.25 秒无有效命令后持续发布零速度
+   - 启动时处于停车状态
+
+8. tools/ros1_ros2_relay_protocol.py
+9. tools/README_R680_RELAY.md
+10. README.md
+
+============================================================
+九、代码验证结果
+============================================================
+
+已执行：
+
+  Python py_compile
+  colcon build --symlink-install --packages-select semantic_rtabmap
+  git diff --check
+
+ROS 2 构建结果：
+
+  semantic_rtabmap 构建成功
+
+可见 ROS 2 可执行文件：
+
+  semantic_rtabmap cmd_vel_safety_node
+  semantic_rtabmap ros2_relay_node
+
+已实际启动/验证过 ROS 2 relay 进程的启动和关闭路径；曾发现 timeout 下 ExternalShutdownException，随后已增加安全 shutdown 处理。
+
+============================================================
+十、今天最后一次只读 relay 测试状态
+============================================================
+
+目标：不驱动小车，只验证 TX1 /odom、/imu、/tf 到 ROS 2。
+
+已经准备好 relay，但测试未完成。
+
+尝试连接 TX1 时：
+
+  ROS 2 主机 192.168.1.16 → TX1 192.168.1.102
+  ping：Destination Host Unreachable / 100% packet loss
+  ARP：FAILED
+  SSH 22：不可达
+  ROS master 11311：不可达
+
+也测试过备用地址：
+
+  192.168.2.102：不可达，邻居状态 INCOMPLETE
+  192.168.0.100：不可达
+
+因此今天没有：
+
+  复制 ros1_relay.py 到 TX1
+  启动 TX1 relay
+  启动 ROS 2 read-only relay
+  验证 ROS 2 侧 /odom、/imu、/tf、/tf_static
+
+这不是 relay 代码验证失败，而是 TX1 在最后测试阶段失去网络可达性。
+
+【根因已定位，见第十三节】
+
+============================================================
+十一、明日开始步骤
+============================================================
+
+1. 在 TX1 本地确认网络：
+
+  hostname -I
+  ip -br addr
+  ip route
+
+2. 确认 TX1 可回连 ROS 2 主机：
+
+  ping -c 3 192.168.2.15
+  ping -c 3 192.168.5.4
+
+3. 在 ROS 2 主机确认 TX1：
+
+  ping -c 3 192.168.2.102
+  timeout 3 bash -c '</dev/tcp/192.168.2.102/22'
+  timeout 3 bash -c '</dev/tcp/192.168.2.102/11311'
+
+4. 网络恢复后，使用 SSH 密码 dongguan 复制 relay：
+
+  /home/jetson/VIO/tools/ros1_relay.py
+  → TX1 /home/wheeltec/ros1_relay.py
+
+5. TX1 侧启动 relay 时使用：
+
+  source /opt/ros/melodic/setup.bash
+  source /home/wheeltec/wheeltec_robot/devel/setup.bash
+  export ROS_MASTER_URI=http://192.168.2.102:11311
+  export ROS_IP=192.168.2.102
+  unset ROS_HOSTNAME
+  python3 /home/wheeltec/ros1_relay.py
+
+6. ROS 2 侧启动 relay：
+
+  source /opt/ros/humble/setup.bash
+  source /home/jetson/VIO/semantic_ws/install/setup.bash
+  export ROS_DOMAIN_ID=99
+  ros2 launch semantic_rtabmap r680_relay.launch.py
+
+7. 只读验证：
+
+  ros2 topic hz /odom
+  ros2 topic hz /imu
+  ros2 topic echo --once /odom
+  ros2 topic echo --once /imu
+  ros2 topic echo --once /tf
+  ros2 topic echo --once /tf_static
+
+8. 只读测试通过后，再单独计划 cmd_vel relay 测试。今天不要把 relay 与 Nav2 或自主探索连接。
+
+============================================================
+十二、重要安全提醒
+============================================================
+
+- 任何连续 /cmd_vel 发布按 Ctrl-C 后，立即发送一次零 Twist。
+- 今天最后一次 relay 测试没有发送运动命令。
+- 不要同时让 TX1 robot_pose_ekf、ROS 2 robot_localization、RTAB-Map 或其他节点发布同一段动态 TF。
+- 不要直接复用 PX4 的 base_link → camera_link 外参。
+- D435 的 prefix 测试已证明会导致 TF 与 camera_info frame 不一致，不能使用。
+- relay 默认密钥 change-me-r680 只适合封闭实验网，正式使用前必须更换。
+- 自主探索必须等只读 relay、TF、时间同步和手动 Nav2 目标验证完成后再启用。
+
+============================================================
+十三、网络问题根因（已定位，重要）
+============================================================
+
+调查结论：TX1 与 ROS 2 主机其实在【同一根网线】上，但两端
+IP 子网不匹配，所以互相不通。这不是 TX1 掉线。
+
+证据：
+
+1) TX1 的 eth0：
+
+   link/ether 00:04:4b:9c:4b:d2
+   inet 192.168.1.102/24
+   state UP（LOWER_UP，网线已连接）
+
+   TX1 的 wlan0：
+
+   state DORMANT, NO-CARRIER（WiFi 未连接）
+
+2) TX1 的路由表只有：
+
+   192.168.1.0/24 dev eth0
+   169.254.0.0/16 dev eth0
+
+   没有默认路由，因此 TX1 只能在 192.168.1.0/24 内通信。
+
+3) ROS 2 主机（Jetson）邻居表关键条目：
+
+   192.168.1.102 dev eno1 lladdr 00:04:4b:9c:4b:d2 STALE
+   192.168.1.102 dev wlP1p1s0  FAILED
+
+   00:04:4b:9c:4b:d2 正是 TX1 eth0 的 MAC，而 Jetson 是在
+   【eno1 有线口】上学到这个 MAC 的。
+
+   => 说明 TX1 的 eth0 与 Jetson 的 eno1 处于同一根网线/L2 段。
+
+4) Jetson 的网口地址：
+
+   wlP1p1s0（WiFi，SSID=XTKZ）: 192.168.1.16/24  ← 默认路由走这里
+   eno1（有线）:               192.168.2.15/24
+
+5) 结果：
+
+   TX1 eth0    = 192.168.1.102/24
+   Jetson eno1 = 192.168.2.15/24
+
+   同一根线，不同子网 => ARP 无法互答 => 双向不通。
+   Jetson 发往 192.168.1.102 的包按路由走 WiFi 出口，
+   TX1 的网线根本收不到，所以 WiFi 网段扫描也找不到 .102。
+
+结论与修复方案：
+
+  推荐方案：让有线链路两端一致到 192.168.2.0/24。
+  （TX1 之前曾出现 192.168.2.102，说明这就是原本的配置。）
+
+  TX1 本地执行：
+
+    sudo ip addr add 192.168.2.102/24 dev eth0
+    ping -c 3 192.168.2.15
+
+  能 ping 通即确认链路正确，然后写进 NetworkManager 使其持久化：
+
+    nmcli connection show
+    nmcli connection modify <连接名> +ipv4.addresses 192.168.2.102/24
+    nmcli connection up <连接名>
+
+  TX1 的 ROS 环境相应改为：
+
+    export ROS_MASTER_URI=http://192.168.2.102:11311
+    export ROS_IP=192.168.2.102
+    unset ROS_HOSTNAME
+
+  ROS 2 主机侧：NoMachine 继续走 WiFi 192.168.1.16，
+  ROS 通信走有线 192.168.2.15，两者互不影响。
+
+  不推荐：把 Jetson eno1 改成 192.168.1.x 去迁就 TX1。
+  那样会让 eno1 和 wlP1p1s0 处于同一子网，产生 ARP/路由歧义。
+
+  注意：relay 配置里的 peer_host 目前是 192.168.1.102，
+  链路切到 192.168.2.0/24 后必须改成 192.168.2.102。
+
+============================================================
+十四、已完成：网络与串口持久化（重启实测通过）
+============================================================
+
+用户实际重启 TX1 后验证：
+
+1) 网络持久化 ✅
+
+   重启后 eth0 自动恢复：
+
+     192.168.2.102/24
+
+   （当时还带有一个 192.168.1.102/24，那是旧 WiFi 网段的遗留地址；
+   更换 WiFi 后已删除，详见第十六节。）
+
+   NetworkManager 配置（已确认重启后仍生效）：
+
+     connection.id:            Wired connection 1
+     connection.interface-name: eth0
+     connection.autoconnect:   yes
+     ipv4.method:              manual
+     ipv4.addresses:           192.168.2.102/24
+     ipv4.gateway:             （空）
+
+   主机侧：ping 192.168.2.102 正常，ARP REACHABLE，SSH 22 开放。
+   不再需要手动执行 ip addr add。
+
+2) 串口映射持久化 ✅
+
+   重启后 udev 自动建立：
+
+     /dev/wheeltec_controller -> ttyCH343USB0
+
+   规则文件：
+
+     /etc/udev/rules.d/wheeltec_controller2.rules
+
+   匹配条件：
+
+     KERNEL=="ttyCH343USB*"
+     ATTRS{idVendor}=="1a86"
+     ATTRS{idProduct}=="55d4"
+     ATTRS{serial}=="0002"
+
+   控制板实际设备：
+
+     /dev/ttyCH343USB0
+     VID 1a86 / PID 55d4 / Serial 0002 / WCH CH343
+
+   雷达侧另有 /dev/ttyUSB0（CP2102）。
+
+   注意：本次重启前曾出现 USB 枚举失败
+   （dmesg: "Cannot enable. Maybe the USB cable is bad?" / error -71），
+   当时 /dev/ttyUSB* 完全不存在，需要重新插拔才恢复。
+   这是硬件层面隐患，建议检查/更换 USB 线。
+
+============================================================
+十五、已完成：TX1 时间同步（自定义轻量方案）
+============================================================
+
+问题：
+
+  TX1 的 RTC 不可用。
+
+    RTC time: 2000-01-05
+    hwclock -w 返回成功但回读仍是 2000-01-05（实际未写入）
+
+  TX1 也没有外网：
+
+    ping 223.5.5.5 失败
+
+  systemd-timesyncd 虽然 active，但 System clock synchronized: no。
+
+  结果：每次重启后 TX1 时钟回到 2023-08-27。
+  实测偏差 98,724,855 秒 = 1142.65 天 ≈ 3.13 年。
+
+影响：
+
+  relay 会保留 ROS 消息头时间戳。3 年偏差会导致 ROS 2 侧
+  tf2 / RTAB-Map 时间戳过旧、外推失败。
+
+选定方案（用户选择 A：轻量自定义同步服务）：
+
+  Jetson 侧（时间源）：
+
+    tools/time_sync_server.py
+    监听 UDP 高位端口 10123（避免端口 123 需要 root）
+    协议：MAGIC=b"R680TS01"
+      请求  MAGIC | seq:u64
+      响应  MAGIC | seq:u64 | t1:u64 | t2:u64
+      （大端，纳秒）
+
+    Jetson 上用用户级 systemd 服务开机自启：
+      ~/.config/systemd/user/r680-time-sync-server.service
+      Linger=yes（已确认），因此无需登录即随开机启动
+      模板文件：tools/r680-time-sync-server.user.service
+
+  TX1 侧（时间客户端）：
+
+    /home/wheeltec/time_sync_client.py
+    用 ctypes 调用 clock_settime(CLOCK_REALTIME)，因此需要 root
+    偏移算法：offset = ((t1 - t0) + (t2 - t3)) / 2
+    取 RTT 最小的样本，降低网络抖动影响
+    兼容 Python 2.7 / 3.6（TX1 是 Python 3.6.9，
+    不能用 time.monotonic_ns()，该 API 需 Python 3.7+）
+
+    TX1 上用系统级 systemd 服务（以 root 运行）：
+      /etc/systemd/system/r680-time-sync.service
+      ExecStart=/usr/bin/python3 /home/wheeltec/time_sync_client.py
+                --server 192.168.2.15 --port 10123
+                --interval 10 --threshold 0.005 --timeout 1.0 --samples 3
+      Restart=always
+      模板文件：tools/r680-time-sync.service
+
+实测结果：
+
+  - 协议精度：RTT 约 0.46–0.60 ms
+  - 首次修正：一次性步进 +98,724,804 秒（+1142.65 天）
+  - 稳态精度：TX1 与 Jetson 偏差保持 1–5 ms
+  - TX1 时钟漂移率：约 0.129 ms/s（约 129 ppm）
+    因此 --threshold 0.005 + --interval 10 约每 40 秒
+    进行一次约 5 ms 的小幅步进
+  - 自愈验证：人为把 TX1 时钟设回 2023-08-27，服务在
+    10 秒内自动修正 1142.64 天，无需任何人工干预
+  - 两个服务均 enabled + active，且已链接进开机 target：
+      Jetson: default.target.wants/r680-time-sync-server.service
+      TX1:    multi-user.target.wants/r680-time-sync.service
+
+未做真机重启复测的原因：
+
+  TX1 重启存在 USB 枚举失败风险（见第十四节），
+  可能导致 /dev/wheeltec_controller 需要物理重新插拔。
+  自愈测试已经完整复现"时钟错误 + 服务运行"的重启后场景，
+  因此没有为验证时间同步而额外重启 TX1。
+
+日常检查命令：
+
+  # TX1
+  systemctl status r680-time-sync
+  journalctl -u r680-time-sync -n 20
+  date -Is
+
+  # Jetson
+  systemctl --user status r680-time-sync-server
+  date -Is
+
+============================================================
+十六、已更换 WiFi（网络地址变更，重要）
+============================================================
+
+Jetson 的无线网络已更换：
+
+  旧：SSID XTKZ           192.168.1.16/24
+  新：SSID Innovation_Lab 192.168.5.4/24   网关 192.168.5.1
+
+机器人链路未受影响（仍走有线）：
+
+  Jetson eno1  192.168.2.15/24
+  TX1    eth0  192.168.2.102/24
+
+也就是说：relay、时间同步、ROS master 访问全都走 192.168.2.x，
+换 WiFi 不影响这些功能。
+
+本次修改：
+
+1) TX1 ~/.bashrc
+
+   原来是错的（地址 192.168.0.103 根本不在用）：
+
+     export ROS_MASTER_URI=http://192.168.0.103:11311
+     export ROS_HOSTNAME=192.168.0.103
+
+   改为：
+
+     export ROS_MASTER_URI=http://192.168.2.102:11311
+     export ROS_IP=192.168.2.102
+
+   原文件已备份为 ~/.bashrc.bak-r680-<时间戳>。
+   现在在 TX1 开新终端会自动得到正确的 ROS 环境。
+
+2) 删除 TX1 eth0 上的遗留地址 192.168.1.102/24
+
+   该地址属于旧 WiFi 网段，已无用途。
+
+   持久化配置（NetworkManager "Wired connection 1"）现为：
+
+     ipv4.method:    manual
+     ipv4.addresses: 192.168.2.102/24
+     autoconnect:    yes
+
+   删除时未重启网卡（只改配置 + 删除运行态地址），
+   因此没有中断 SSH 和 relay 链路。
+
+3) 文档地址更新
+
+   - R680_AUTONOMOUS_EXPLORATION.md：NoMachine 地址改为 192.168.5.4
+   - start_foxglove.sh / README.md / README_EN.md：
+     Foxglove 示例地址改为 ws://192.168.5.4:8765
+   - 本文件第一、十一节中的操作地址同步更新
+
+4) 有意保留未改的内容
+
+   - 第十三节（网络排查历史）中的 192.168.1.x 属于当次记录，
+     保留原样，避免把历史描述改错
+   - tools/ros1_relay.py 与 ros2_relay_node.py 里各有一处
+     注释解释"默认值曾经是 WiFi 地址"，同为历史说明，保留
+
+5) TX1 无线网卡保持不动
+
+   TX1 的 wlan1 仍在 192.168.0.100/24（另一张网络），
+   按用户决定不做变更。TX1 不需要上外网。
+
+日常连接方式（不变）：
+
+  NoMachine / 远程桌面   → WiFi  192.168.5.4
+  ROS 数据链路            → 有线  192.168.2.15 ↔ 192.168.2.102
+
+
+
+

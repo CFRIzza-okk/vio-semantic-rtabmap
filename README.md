@@ -17,6 +17,285 @@
 
 手持展示使用 D435 的 RGB-D 视觉里程计；PX4 模式使用飞控里程计。这两种模式的里程计来源和 TF 发布方式不同，不能混用。切换模式前，先在原终端按 Ctrl-C 退出上一套流程，避免重复启动相机或 RTAB-Map 节点。
 
+## R680 麦轮小车自主探索（ROS 2 + TX1 ROS 1）
+
+项目已增加 R680 接入基础：
+
+```bash
+cd ~/VIO/semantic_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select semantic_rtabmap
+source install/setup.bash
+ros2 launch semantic_rtabmap r680_navigation.launch.py \
+  camera_x:=<实测x> camera_y:=<实测y> camera_z:=<实测z> \
+  camera_roll:=<实测roll> camera_pitch:=<实测pitch> camera_yaw:=<实测yaw>
+```
+
+TX1 端仍由 ROS 1 Wheeltec 驱动负责底盘和底盘里程计；ROS 1–ROS 2 bridge 应只建立下面的接口：
+
+- TX1 `/odom` → ROS 2 `/odom`（`odom_combined → base_footprint` 的动态 TF 只能由一个节点发布）；
+- TX1 `/imu` → ROS 2 `/imu`；
+- ROS 2 `/cmd_vel_safe` → ROS 1 `/cmd_vel`。
+
+Nav2 的规划输出接 `/cmd_vel_nav`，安全节点再输出 `/cmd_vel_safe`。急停 `/safety/estop`、雷达障碍 `/safety/obstacle_stop` 和定位健康 `/safety/localization_valid` 任一不满足条件时输出零速度，并在 `/safety/stop_reason` 记录停车原因。不要让 Nav2 或 bridge 之外的节点直接连接底盘，也不要同时启动 PX4 的飞行器 TF。
+
+`base_footprint → base_link` 和 `base_link → camera_link` 默认由本启动文件发布，但如果 TX1 驱动或 URDF 已发布其中一段，应将对应参数设为 `false`，避免重复 TF。D435 驱动负责 `camera_link → camera_color_optical_frame` 等相机内部 TF；相机安装位姿必须现场测量后再填入，不能复用 PX4 外参。
+
+TX1 侧的驱动与 UDP relay 已完成**实机端到端验证**（2026-10-13）：在 TX1 上用合成 `/odom`
+验证上行（值原样到达 ROS 2，实测 10.01 Hz），在 Orin 上向 `/cmd_vel_safe` 发指令验证下行
+（包到达 TX1:19000，`sig ok`，且 `enable_cmd_vel` 保持关闭）。全程**未启动底盘驱动、未发送运动指令**。
+relay 脚本在 `tools/ros1_relay.py`，部署与排障说明见 [tools/README_R680_RELAY.md](tools/README_R680_RELAY.md)。
+
+⚠️ 此前这条链路**实际上是不通的**，有若干静默缺陷，均已修复并加了回归测试：
+
+1. **端口配反**：两侧对 `rx_port`/`tx_port` 的语义相反（ROS 2 侧 `rx_port` 是本机绑定口，
+   TX1 侧 `tx_port` 才是），照抄对端就会变成两端都绑 19000、都往对端 19001 发——无人监听，
+   双向零包。现已配成互补的 19001/19000。守卫：`test/test_relay_ports.py`。
+2. **TX1 脚本是 Python 3 代码**：TX1 是 Melodic + Python 2.7，脚本在
+   `threading.Thread(daemon=True)` 处直接 `TypeError` 崩溃，**从未在车上成功运行过**。
+   另有 `json.JSONDecodeError`、`time.monotonic`、`math.isfinite`、`except OSError`
+   共五处 py3-only 写法，其中两处只在**开启运动权限后才触发**（正好是安全看门狗）。
+   守卫：`test/test_tx1_relay_python2.py`。
+3. **`/tf_static` QoS 违约**：relay 用 `create_publisher(TFMessage, "/tf_static", 10)`
+   发静态 TF，而裸整数深度默认是 **VOLATILE**；`tf2_ros` 与本包 `safety_monitor_node`
+   都按 `TRANSIENT_LOCAL` 订阅。ROS 2 里这是**不兼容**的一对，连接被直接拒绝，
+   静态变换**一个也收不到**（`tf2_echo` 报 `DURABILITY_QOS_POLICY`）。已改为显式
+   `TRANSIENT_LOCAL`。守卫：`test/test_relay_tf_static_qos.py`，其中一条专门护栏
+   "接线"而非"常量"——把 `create_publisher` 改回裸整数即失败。
+4. **`time_sync_client.py` 的 Python 3 写法与 shebang**（2026-10-14）。
+   这条要**准确陈述，不要夸大**：脚本里有 7 处 `print(..., flush=True)`
+   （`flush` 关键字是 Python 3.3+，在 2.7 上抛
+   `TypeError: 'flush' is an invalid keyword argument for this function`），
+   shebang 也写着 `python3`。
+   ⚠️ **但它一直工作正常，时钟同步从未因此失效。** 实测 TX1 上是
+   `r680-time-sync.service`（systemd，`Restart=always`，以 root 运行）用它自己的
+   **`/usr/bin/python3`** 和 `--interval 10 --threshold 0.005` 拉起这个脚本——
+   在 python3 下 `flush=` 完全合法，所以这条路径根本不触发该 bug。
+   2026-10-14 01:06:54 的日志可见它把时钟一步校正了
+   **+98787286 s（+1143 天）**，正是 TX1 断电后 RTC 回到 2000 年所需的那一跳。
+   修复的价值在于**消除脆弱性**（任何人用 `python2` 调用、或让 shebang 生效、
+   或把它放到只有 python2 的环境里，就会立刻崩在第一个 print 上），而不是"救活了
+   一个死掉的功能"——**当初把它写成"从未成功运行过"是错的，此处更正。**
+   ⚠️ **`py_compile` 抓不到这两处**：一个是运行时错误，一个只在直接执行时才生效。
+   守卫：`test/test_tx1_relay_python2.py`，现按脚本参数化，并用 AST 检查
+   `print(..., flush=...)`（用 AST 而非正则，是因为文件**文档字符串里本身就写着**
+   这个陷阱的说明文字）。
+
+   > 实测补充（2026-10-14）：TX1 晶振漂移约 **23 ppm**（连测 8 次，每 10 s 偏差
+   > 单调增长约 0.228 ms，即 -0.065 → -1.664 ms）。因为服务阈值是 5 ms，它约每
+   > **219 秒**才步进校正一次，于是时钟呈**锯齿**状：漂移到 5 ms → 阶跃 → 再漂移。
+   > 这可以解释为什么在不同时刻测同一个偏移会得到 +2.5 / +4.4 / +5.1 ms 等不同值——
+   > **一部分是锯齿，不全是测量误差**。5 ms 远小于 RTAB-Map 的
+   > `wait_for_transform`（200 ms），所以它不足以解释那条 TF 警告，但排查时要知道
+   > 这个锯齿存在，否则会把它误当作噪声或测量错误。
+5. **`/scan` 从未产出过一帧**（2026-10-14 发现）：`depthimage_to_laserscan` 一直订阅
+   `/depth_camera_info` —— 一个 **Publisher count: 0** 的话题，D435 从不发布这个名字，
+   所以它每帧打印 `No camera info, skipping point cloud squash`。**危险的是下游症状**：
+   探索配置里写明"没有 /scan 数据时按'障碍存在'处理"，于是 `obstacle_stop` 读作
+   `true`，看起来像检测到了障碍，**实际是传感器全瞎**。
+   修复的二次陷阱：remap 的**源名字必须是 `depth_camera_info`，不是 `camera_info`**——
+   写成后者**不报错也不警告**，症状完全一样。
+   > ⚠️ **同一次修复里我把 `output_frame` 改错了**（详见第 7 条）：当时改成
+   > `camera_color_optical_frame`，理由是对齐深度图像及其 camera_info——**那个理由
+   > 混淆了"数据表达在哪个 frame"和"LaserScan 角度语义要求哪种 frame"**，
+   > 已回退为 `camera_depth_frame`。
+   守卫：`test/test_r680_sensor_and_map_wiring.py`。
+6. **地图话题名对不上**（2026-10-14 发现）：配置按 `/map` 写，但 RTAB-Map 的 namespace
+   默认是 `rtabmap`，**实际发布 `/rtabmap/map`**。nav2 的 `static_layer` 未设
+   `map_topic` 时默认订阅 `/map`，于是 **global_costmap 永远是空的**，规划器把未探索
+   区域当作可通行——同样不报任何错。已在 nav2 static_layer、探索配置与探索启动文件三处
+   显式写成 `/rtabmap/map`。守卫：`test/test_r680_sensor_and_map_wiring.py`，
+   其中一条断言三处取值必须一致（当初正是"语义层知道 namespace、导航层不知道"才漏掉的）。
+7. **`/scan` 的 `output_frame` 用错，差 90 度**（2026-10-14 发现并修复）。
+   `depthimage_to_laserscan` 的 `output_frame` 曾被"修正"为
+   `camera_color_optical_frame`，理由是"对齐深度图像和它的 camera_info 的 frame_id
+   都是它"。**那个理由混淆了两件不同的事**：
+   - 深度图像**数据**表达在哪个 frame —— 确实是 `camera_color_optical_frame`；
+   - `LaserScan` 的**角度语义**要求哪种 frame —— **x-y 平面必须水平**（REP-103）。
+
+   实测 TF（2026-10-14）：
+   ```
+   camera_link -> camera_depth_frame          RPY [0.000, 0.000, 0.000]（姿态同 camera_link）
+   base_link   -> camera_depth_frame          RPY [0.000, 1.660, 0.000] 度
+   base_link   -> camera_color_optical_frame  RPY [-91.653, 0.124, -90.678] 度
+   camera_depth_frame -> camera_color_optical_frame  平移 15 mm，姿态差约 90 度
+   ```
+   两个 frame **差约 90 度姿态**（不只是当初以为的 15 mm 平移——**只看平移是漏看**）。
+   `camera_depth_frame` 与 `camera_link` 姿态一致（x 前、y 左、z 上），x-y 平面是
+   **水平的**；光学坐标系（z 前、x 右、y 下）的 x-y 平面是**像平面，竖直的**。
+   具体判据：中心波束（angle 0、距离 r）即该 frame 下的点 `(r, 0, 0)` ——
+   在 `camera_depth_frame` 里变换后是**正前方 r 米**，在光学坐标系里则**偏到侧下方**。
+
+   **为什么这个错误能藏住**：安全节点 `obstacle_monitor_node` 直接读
+   `msg.angle_min/increment`、**不做 TF 变换**，所以它不受影响（`obstacle_stop`
+   一直表现正常，这才是它没被发现的真正原因）。但 **Nav2 的 costmap 障碍层会把
+   scan 变换到全局系**，用光学坐标系就会把障碍摆到竖直方向、错 90 度，
+   **在 costmap 里造出幽灵障碍**——一开 Nav2（Phase F 自主探索）就会中招。
+
+   已回退为 `camera_depth_frame`。15 mm 的位置误差是真的，但**姿态错 90 度远比
+   位置差 15 mm 严重**。守卫：`test/test_r680_sensor_and_map_wiring.py` 中断言
+   frame 名不得以 `_optical_frame` 结尾。
+
+> 实测补充（2026-10-13）：TX1 的 `static_transform_publisher` 节点发的是 **`/tf`**，
+> 不是 `/tf_static`；TX1 的 `/tf_static` 只有 `robot_state_publisher` 发出的一条**空**消息
+> （URDF 里没有 static joint）。所以 relay 的静态通路上**无物可转**——QoS 修好只是让它
+> 变成"正确的空转"。**Orin 的静态 TF 必须由 `r680_navigation.launch.py` 自备，不要依赖 relay。**
+> 同一段过滤逻辑对 `/tf` 也生效，实测 Orin 的 `/tf` 帧表里确实没有 TX1 那个旧 `camera_link`。
+
+> 实测补充（2026-10-14）：**阶段 C（建图与定位）已在真机上跑通**，且是这台车第一次
+> 真正建立地图与定位链路。四个检查项全部通过：
+>
+> - `map→base_footprint` = `[-0.002, 0.002, 0.000]`，RPY `[0.004, 0.007, 0.102]`；
+> - `/rtabmap/map` = `nav_msgs/OccupancyGrid`，**127×86 @ 0.05 m**（6.35×4.3 m）；
+> - `localization_valid`：连采 183 个样本 **183 true / 0 false / 0 翻转**；
+> - `/scan` **17.3 Hz**，614/640 有效波束，张角 55.4°，量程 1.04 / 2.86 / 4.52 m；
+>   `obstacle_stop` 在空场为 **false**（手挡相机前应变 true）。
+>
+> 启动时 `camera_link` 实测 `[0.150, 0.000, 0.165]`、pitch `1.660°`，与实测外参逐位一致。
+>
+> **`localization_valid` 的"稳定"必须两端都验。** 只证明它不翻转是不够的：TX1 断电
+> 那一刻它正确地从 `true` 翻成 **`false`**，这才证明监视器不是恒真、确实在跟随真实状态。
+>
+> 另有两条容易误判的观察：RTAB-Map 的 `/rtabmap/map` 是 **latch（`TRANSIENT_LOCAL`）**
+> 发布的，`ros2 topic hz` 用的是 VOLATILE 订阅、**收不到** latch 消息，会误报
+> "does not appear to be published yet"——用
+> `ros2 topic echo /rtabmap/map --qos-durability transient_local` 才看得到。
+> 以及静止的车会一直停在 `local map=2, WM=2`：RTAB-Map 只在地图移动超过
+> `RGBD/LinearUpdate`/`AngularUpdate` 阈值时才新增节点，这是正常行为，不是故障。
+
+> ⚠️ **数据库膨胀（2026-10-14 查清）。** 上面那条"静止不新增节点"只对**工作内存**
+> 成立，对**数据库**不成立，两者必须分开看：静止的车每 0.5 秒仍会写入一个节点，
+> 只是它没被链接进图、因此不进 WM（所以 `local map=1` 与 `Node=134` 同时为真）。
+>
+> **RTAB-Map 默认把这些未链接的节点连同 RGB/深度图一起存盘，这是给调试用的默认值。**
+> 实测静止 60 秒（DetectionRate 2.0）：
+>
+> | 配置 | Node | Data | 库大小 |
+> |---|---|---|---|
+> | 默认 `Mem/NotLinkedNodesKept=true` | 134 | 134 | **4.5 MB** |
+> | `Mem/NotLinkedNodesKept=false` | **1** | **1** | **272 KB** |
+>
+> **134 个节点里只有 1 个是真正被链接的。** 遗留库 `~/.ros/rtabmap_r680.db` 正是
+> **1001 MB / 3280 节点 / 仅 38 条 Link**；同样的模式在 10月8日（130 MB）和
+> 10月10日（593 MB）的库上已经出现过，所以这是长期问题，不是 Phase C 引入的。
+>
+> 修法：启动时加 `--Mem/NotLinkedNodesKept false`。RTAB-Map 作者
+> （[introlab/rtabmap_ros#671](https://github.com/introlab/rtabmap_ros/issues/671)）
+> 明确说这个默认值是给调试的，并建议**一直设成 false**，包括正式建图时。
+> 可选再加 `--Mem/BinDataKept false` 不存图（库更小，代价是事后不能用
+> `rtabmap-databaseViewer` 回看）。已有的大库可用官方工具瘦身：
+> `rtabmap-reprocess --Mem/NotLinkedNodesKept false --Mem/BinDataKept false in.db out.db`。
+>
+> **排查陷阱**：不要在 RTAB-Map 运行时用 `sqlite3` 打开它的库——读连接持锁会让
+> RTAB-Map 以 `DBDriverSqlite3.cpp:5034 addStatisticsQuery() … database is locked`
+> 致命崩溃（退出码 -6）。**先停 RTAB-Map，再查库。**
+>
+> 另外：那条 `cannot get the corresponding TF odom_combined->base_footprint` 警告
+> 在 2026-10-14 的复现中**没有再次出现**（计数 0），所以此前"`/odom` 与 `/tf` 走两条
+> UDP 包导致结构性乱序"的猜测**缺乏证据支持**，已撤回。它更像是启动瞬间的一次性竞争。
+> 实测 `odom_combined→base_footprint` 的 TF 更新率是 **60 Hz**，远高于 `/odom` 的
+> 20 Hz——若真是结构性落后，不该只出现一次。
+
+> `/odom` 协方差 1e6 的来源已定位（2026-10-14）：**在 TX1 的驱动，不在 relay。**
+> `/odom` 由 `/wheeltec_robot` 发布（`/robot_pose_ekf` 只是它的订阅者，另行发布
+> `/robot_pose_ekf/odom_combined`），relay 是忠实转发的。实测对角项
+> （x/y/z/roll/pitch/yaw）：
+>
+> | x | y | z | roll | pitch | yaw |
+> |---|---|---|---|---|---|
+> | 1e-09 | 0.001 | **1e6** | **1e6** | **1e6** | **1e-09** |
+>
+> **1e6 精确地落在 z/roll/pitch 上——正是平面轮式底盘真正无法观测的三个自由度；
+> yaw 反而是 1e-09（极度自信）。** 所以这是语义上**正确**的表达，不是驱动偷懒。
+> RTAB-Map 的 `Very large angular variance (1000000.000000)` 因此指的是 roll/pitch，
+> 不是 yaw。
+>
+> 是否要改尚未决定。可选的思路是给这三个自由度填一个有限值（等价于断言"车始终贴地"，
+> 这是常见建模假设，但车若真的倾斜就会失真），而不是保留"完全未知"。
+> 在决定之前，这个警告的实际影响仅限于 RTAB-Map 对 roll/pitch 的置信度处理——
+> Phase C 期间 `localization_valid` 183/183 稳定，未见实际损害。
+
+> 时钟更正（2026-10-14，留档以免重蹈）：阶段 C 期间曾用"跨 SSH 会话括起 `date`"估出
+> TX1 偏 **+240 ms**，并据此把 RTAB-Map 的一条 TF 查询警告归因于时钟。**该数字是错的。**
+> SSH 连接/认证/解释器启动的开销被整个算进了"偏移"，且它并不对称落在括起中点。
+> 改用协议方式（四个时间戳，可减掉 RTT 与服务器处理时间）在**同一 SSH 会话内**连测 6 次，
+> 得 **+2.483 ~ +2.514 ms，散布 46 µs，RTT ~0.5 ms**——真实偏移 **+2.5 ms**，比
+> RTAB-Map 的容差小两个数量级，**不可能是那条警告的原因**。该警告的真因**尚未确定**
+> （已排除时钟；怀疑 `/odom` 与 `/tf` 走两条独立 UDP 路径、到达顺序无保证）。
+>
+> 旁证：`localization_valid` 183/183 稳定；若真偏 240 ms，`localization_monitor`
+> 的 0.5 s 超时早就会周期性把它打成 false。
+>
+> 时钟现状：TX1 的 RTC 停在 **2000 年**且不可写；`ntpd` 已装但未运行；
+> `systemd-timesyncd` 在跑但 `System clock synchronized: no`（从未同步成功）。
+> 因此 `tools/time_sync_client.py` 是**唯一**的校正途径——而它此前因
+> `print(..., flush=True)` 在 2.7 上崩溃，从未成功运行过（见缺陷 4）。
+
+### 自主导航探索
+
+在 relay 之上增加了基于 frontier 的自主探索能力，完整策略、参数与分阶段验证流程见 [R680_AUTONOMOUS_EXPLORATION.md](R680_AUTONOMOUS_EXPLORATION.md)：
+
+- `frontier.py`：frontier 检测、连通性过滤、评分、失败黑名单（纯算法，无 ROS 依赖，可单测）；
+- `exploration_node.py`：探索状态机，只下发 Nav2 目标，**从不直接发布速度**；
+- `safety_monitor_node.py`：障碍监视器与定位监视器，为安全节点提供 `/safety/obstacle_stop` 与 `/safety/localization_valid`；
+- `r680_exploration.launch.py`：把 D435 对齐深度转成 `/scan`，拉起安全节点，并可选拉起 Nav2；
+- `r680_nav2_bringup.launch.py`：本工程专用 Nav2 启动。
+
+**为什么不用官方 `nav2_bringup/navigation_launch.py`**：实测它的速度接线是
+`controller_server → /cmd_vel_nav`，但 `behavior_server` 和 `velocity_smoother`
+都直接发布 `/cmd_vel`，会绕过 `cmd_vel_safety`。本工程改为让
+`controller_server` 与 `behavior_server` 的输出**都**汇入 `/cmd_vel_nav`，
+且不启动 `velocity_smoother`，保证整条链路里唯一发布 `/cmd_vel_safe` 的节点是
+`cmd_vel_safety`。
+
+默认最保守：`dry_run:=true` 且 `autostart:=false`，启动后只选点、不驱动底盘。
+
+```bash
+cd ~/VIO/semantic_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+# 先只验证选点是否合理，机器人不会动
+ros2 launch semantic_rtabmap r680_exploration.launch.py dry_run:=true
+ros2 service call /exploration/start std_srvs/srv/Trigger
+
+# 确认选点合理、场地空旷且有人守候后，再放开运动
+ros2 launch semantic_rtabmap r680_exploration.launch.py dry_run:=false
+```
+
+### D435 点云避障（观测阶段）
+
+D435 目前是整车唯一的避障传感器。除了现有的"对齐深度 → `/scan`"，还可以让相机直出
+`PointCloud2` 喂给 Nav2 的 `VoxelLayer`，用**高度阈值**（而不是猜 `scan_height`）剔除地面，
+从而看见低矮障碍和桌沿。实测结论、两个静默失败的坑和待应用配置见
+[R680_DEPTH_CLOUD_OBSTACLES.md](R680_DEPTH_CLOUD_OBSTACLES.md)。
+
+两个会**静默失败**的坑（都已实测确认）：
+
+- 点云开关**不叫** `pointcloud.enable`。realsense2_camera 的前缀取自 librealsense 处理块名，
+  本机是 `Pointcloud (NEON)` → 真实参数名 **`pointcloud__neon_.enable`**。传错的后果是节点照常启动、
+  话题照常出现在 `topic list` 里，但**一个发布者都不建**且不报错。查证：
+  `ros2 param list /camera/camera | grep -i point`。
+- **强制指定 profile**（如 `640,480,30`）会让相机帧超时（`Frames didn't arrived within 5 seconds`），
+  点云一帧都出不来；用相机默认的深度 848×480 才正常。
+
+只读观测工具（不发速度、不写 costmap）：
+
+```bash
+ros2 launch semantic_rtabmap r680_depth_cloud.launch.py
+ros2 topic echo /depth_cloud/report --once --truncate-length 100000
+```
+
+`point_cloud_inspector_node` 会报告频率/点数/高度分布，并由地面平面反推**相机离地高度与俯仰角**
+（即 `base_link -> camera_link` 缺的外参）。注意外参目前仍是 `0`（未标定），
+在填入实测值之前 `min_obstacle_height` 只能是占位符。
+
+测试（不需要机器人、不需要相机）：
+
+```bash
+python3 -m pytest src/semantic_rtabmap/test/ -q      # 94 passed
+```
+
 ## 安装
 
 在项目目录打开终端并运行：
@@ -80,7 +359,7 @@ cd ~/VIO
 ./start_foxglove.sh
 ```
 
-在同一局域网内的另一台电脑打开 Foxglove Studio 桌面版，连接脚本打印的地址，例如 `ws://192.168.1.8:8765`。Foxglove 的 3D 面板 Fixed Frame 设为 `map`，可添加：
+在同一局域网内的另一台电脑打开 Foxglove Studio 桌面版，连接脚本打印的地址，例如 `ws://192.168.5.4:8765`。Foxglove 的 3D 面板 Fixed Frame 设为 `map`，可添加：
 
 - `/rtabmap/cloud_map`：全局三维点云地图（主要显示）；
 - `/rtabmap/map`：二维占据栅格；
