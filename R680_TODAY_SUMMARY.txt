@@ -869,3 +869,64 @@ TX1 的 rostopic list 里**没有 /scan** —— 车上的网口雷达没有在�
 (而且 TX1 只有 eth0/wlan1 两个接口,没有雷达那个 192.168.1.x 网段,
 物理上也接不上)。本项目目前的 /scan 完全来自 Orin 的 D435 深度相机,
 视野只有 ±27°,侧后方是盲区。如果车上有可用的雷达,值得单独查一下。
+
+========================================================================
+2026-10-15 补充:Orin 上使用 ROS 1 的正确方式
+========================================================================
+
+Orin 主机上**没有** ROS 1。ROS 1 只在 ros:noetic 容器(xtkz)里。
+
+【两个脚本】
+
+  tools/ros1_env.sh   —— source 它,设好 ROS_MASTER_URI 与 ROS_IP
+  tools/ros1.sh       —— 一键跑 ROS 1 命令(自动起容器 + 设环境)
+
+用法:
+
+  bash tools/ros1.sh rostopic list
+  bash tools/ros1.sh rosnode list
+  bash tools/ros1.sh rostopic echo -n 1 /PowerVoltage
+  bash tools/ros1.sh rostopic info /cmd_vel
+
+实测输出:
+
+  rosnode list ->
+    /base_to_gyro /base_to_laser /base_to_link /joint_state_publisher
+    /power_logger_... /r680_ros1_relay /robot_pose_ekf
+    /robot_state_publisher /rosout /wheeltec_robot
+
+【ros1_env.sh 取本机地址的三层策略】
+
+第一版写死了 `ip -4 addr show eno1`,结果在容器里**直接失败** ——
+ros:noetic 镜像里没有 `ip` 命令。而那个容器正是本项目使用 ROS 1 的地方,
+所以第一版在真正要用的环境里根本不能用。
+
+现在由内到外三层,都不假设有特定命令:
+
+  1. python3 的 UDP socket getsockname() —— 问内核"去机器人我用哪个地址"
+  2. `ip route get <robot>` 取 src
+  3. ifconfig
+
+第 1 层不只是"没有 ip 时的退路",它**比读接口列表更准**:它自动选中能路由到
+机器人的那条路。实测在 Orin 上给出 eno1 的地址(192.168.2.15)而不是 WiFi 的
+(192.168.5.4)—— 而 WiFi 那条路 TX1 走不通。用 `hostname -I` 或"取第一个非
+lo 接口"都可能挑中 WiFi 地址,那是错的。
+
+验证方式也改成 python3 socket 优先、/dev/tcp 兜底。
+
+【脚本的设计原则:失败要响亮,且不污染环境】
+
+  * 取不到地址 -> 打印已试过的手段,明确说"没有 source 任何东西",返回 1
+  * source 前先打印会被覆盖的旧变量(它们正是上次故障的根源)
+  * 设完主动探测 master 端口,不通就报错并给出启动命令
+  * tools/ros1.sh 里环境建立失败则**拒绝执行命令** —— 不在错的环境里跑东西,
+    那正是本次故障的成因
+
+实测容器里还检出了 ros:noetic 镜像自带的残留 ROS_MASTER_URI=http://localhost:11311
+并被正确报告。
+
+【实测记录】
+
+  /PowerVoltage 读数(充电中)在 12.09 ~ 12.23 V 之间缓慢波动。
+  这不是稳定上升,更像是充电器在做"充-停-测"循环,或受车上负载影响。
+  等充电结束、电压稳定后再判断电池化学体系与满电电压。

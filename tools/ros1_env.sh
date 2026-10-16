@@ -25,6 +25,19 @@
 # 本脚本用当前实际地址重新导出,并在设置后**主动验证**,而不是假设。
 #
 # ---------------------------------------------------------------------------
+# 取本机地址的方式,由内到外三层,都不假设有某个特定命令
+#
+# 首选是问内核:"要到 ROBOT_IP 那个地址,我会用哪个本机地址?" —— 一个连向
+# 目标地址的 UDP socket 的 getsockname() 就是答案。这比读接口列表**更准**:
+# 它自动选中能路由到机器人的那条路。实测在 Orin 上它给出 eno1 的地址而不是
+# WiFi 的 —— 而 WiFi 那条路 TX1 是走不通的。用 `hostname -I` 或"取第一个
+# 非 lo 接口"都可能挑中 WiFi 地址,那是错的。
+#
+# 之所以要这么绕:ros:noetic 容器里**没有 `ip` 命令**(实测),
+# 而那个容器正是本项目使用 ROS 1 的地方。脚本必须在容器里也能用。
+# 我第一版写死了 `ip -4 addr show eno1`,在容器里直接失败。
+#
+# ---------------------------------------------------------------------------
 # ⚠️ 安全提醒 —— 在拿到车之前必读
 #
 # TX1 的底盘驱动 /wheeltec_robot **直接订阅** /cmd_vel,不经过 relay,
@@ -42,26 +55,54 @@
 #
 # 不要加 `set -u`。
 
-ROBOT_IP=192.168.2.102          # TX1,ROS 1 master
-ROBOT_PORT=11311
-MY_IFACE=eno1                   # 接到机器人的那条网线
+ROBOT_IP="${ROBOT_IP:-192.168.2.102}"   # TX1,ROS 1 master
+ROBOT_PORT="${ROBOT_PORT:-11311}"
 
-# 取本机在这条链路上的实际地址。不用 hostname -I:它会返回所有接口,
-# 可能挑中 WiFi 地址,而那条路 TX1 走不通。
-MY_IP=$(ip -4 addr show "$MY_IFACE" 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1)
+_find_my_ip() {
+    # 第 1 层:让内核回答"去机器人我用哪个地址"。选中的一定是能路由过去的那条路。
+    local ip
+    ip=$(python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(('${ROBOT_IP}', ${ROBOT_PORT}))
+    print(s.getsockname()[0])
+except Exception:
+    sys.exit(1)
+finally:
+    s.close()
+" 2>/dev/null)
+    if [ -n "$ip" ] && [ "$ip" != "0.0.0.0" ]; then echo "$ip"; return 0; fi
+
+    # 第 2 层:ip 命令(宿主机上有,容器里没有)
+    if command -v ip >/dev/null 2>&1; then
+        ip=$(ip route get "$ROBOT_IP" 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+        if [ -n "$ip" ]; then echo "$ip"; return 0; fi
+    fi
+
+    # 第 3 层:ifconfig(更老的系统)
+    if command -v ifconfig >/dev/null 2>&1; then
+        ip=$(ifconfig 2>/dev/null | grep -B1 -A1 "inet " | grep -oP 'inet \K192\.168\.[0-9.]+' | head -1)
+        if [ -n "$ip" ]; then echo "$ip"; return 0; fi
+    fi
+
+    return 1
+}
+
+MY_IP=$(_find_my_ip)
 
 if [ -z "$MY_IP" ]; then
-    echo "✗ 取不到 $MY_IFACE 的地址 —— 网线没插?" >&2
-    echo "  当前接口:" >&2
-    ip -4 addr show 2>/dev/null | grep -E "^[0-9]+:|inet " | sed 's/^/    /' >&2
+    echo "✗ 取不到通往 ${ROBOT_IP} 的本机地址 —— 网线没插?" >&2
+    echo "  三种探测都试过了(python3 socket / ip route / ifconfig)。" >&2
+    echo "  可以手工指定: export ROS_IP=<本机地址>; source tools/ros1_env.sh" >&2
     echo "  (没有 source 任何东西,环境保持原样)" >&2
     return 1 2>/dev/null || exit 1
 fi
 
 # 顺手指出旧的残留变量,因为它们正是上一次故障的根源
-STALE=$(env | grep -E "^ROS_(IP|HOSTNAME|MASTER_URI)=" | grep -v "192.168.2.102\|$MY_IP")
+STALE=$(env | grep -E "^ROS_(IP|HOSTNAME|MASTER_URI)=" | grep -v "${ROBOT_IP}\|^ROS_IP=${MY_IP}$")
 if [ -n "$STALE" ]; then
-    echo "  注意:覆盖掉旧的 ROS 变量(它们指向已失效的网段):" >&2
+    echo "  注意:覆盖掉旧的 ROS 变量(它们可能指向已失效的网段):" >&2
     echo "$STALE" | sed 's/^/    /' >&2
 fi
 
@@ -73,7 +114,24 @@ echo "  ROS_MASTER_URI = $ROS_MASTER_URI"
 echo "  ROS_IP         = $ROS_IP"
 
 # 验证而不是假设:master 端口必须真的通
-if timeout 5 bash -c "cat < /dev/null > /dev/tcp/${ROBOT_IP}/${ROBOT_PORT}" 2>/dev/null; then
+_probe() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import socket, sys
+s = socket.socket()
+s.settimeout(5)
+try:
+    s.connect(('${ROBOT_IP}', ${ROBOT_PORT}))
+except Exception:
+    sys.exit(1)
+finally:
+    s.close()
+" 2>/dev/null && return 0
+    fi
+    timeout 5 bash -c "cat < /dev/null > /dev/tcp/${ROBOT_IP}/${ROBOT_PORT}" 2>/dev/null
+}
+
+if _probe; then
     echo "  ✓ master 可达"
 else
     echo "  ✗ ${ROBOT_IP}:${ROBOT_PORT} 连不上 —— TX1 上的 roscore 没起?" >&2
