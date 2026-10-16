@@ -60,6 +60,79 @@ need() { # need <描述> <实际> <期望>
 printf '模式: %s   限速: %.2f / %.2f / %.2f   预算: %.0fs / %.0fs\n' \
     "$MODE" "$MAX_LIN" "$MAX_LAT" "$MAX_ANG" "$MAX_EXPLORE_TIME" "$GOAL_TIMEOUT"
 
+# ---------------------------------------------------------------- 时钟闸
+# 2026-10-16 复盘:Orin 的 RTC 停在 1970-01-01 且按**本地时区**解读,开机后系统
+# 时钟整整落后真实时间 12 小时(实测两次读数相差 44359 s)。栈跑到一半 NTP 把它
+# 拽回来 —— 一次 +44359 s 的跳变。后果:
+#   * tf2 缓冲里的历史变换全部作废
+#   * 传感器消息被时间过滤器丢弃,反复打印:
+#       Message Filter dropping message: frame 'camera_depth_frame'
+#       ... 'the timestamp on the message is earlier than all the data in the
+#       transform cache'
+#   * localization_valid 在 False/True 之间抖动 -> cmd_vel_safety 反复清零速度
+#   * 控制器永远闭不上环 -> controller_server "Failed to make progress" ×3
+#     (间隔 15.0 / 15.1 / 15.0 s,正是进度检查器的窗口)
+#   * 探索器 60 s 目标超时 -> "goal timed out; rejecting it"
+#     -> 0 个目标就宣告 COMPLETE
+# 整场故障**表现成 Nav2 的问题,根子是时钟**。所以动任何东西之前先验时钟。
+#
+# 一次性修法:
+#   sudo timedatectl set-local-rtc 0
+#   sudo hwclock -w
+#   sudo systemctl enable --now systemd-time-wait-sync
+#   sudo reboot                     # set-local-rtc 必须重启才生效
+CLOCK_SETTLE="${CLOCK_SETTLE:-3}"
+if [ "${SKIP_CLOCK_CHECK:-0}" = "1" ]; then
+    printf '\n=== 前置闸门:时钟检查 === (SKIP_CLOCK_CHECK=1,已跳过)\n'
+else
+    say "前置闸门:时钟检查"
+    clock_bad=0
+
+    _sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+    if [ "$_sync" = "yes" ]; then
+        printf '  ✅ %-38s %s\n' "NTP 已同步" "$_sync"
+    else
+        printf '  ❌ %-38s %s\n' "NTP 已同步" "${_sync:-读取失败}"; clock_bad=1
+    fi
+
+    _lrtc=$(timedatectl show -p LocalRTC --value 2>/dev/null)
+    if [ "$_lrtc" = "no" ]; then
+        printf '  ✅ %-38s %s\n' "RTC 按 UTC 解读" "$_lrtc"
+    else
+        printf '  ❌ %-38s %s  <- 需 set-local-rtc 0 并重启\n' "RTC 按 UTC 解读" "${_lrtc:-读取失败}"
+        clock_bad=1
+    fi
+
+    # 墙钟 vs 单调钟:时钟被 NTP 步进时,墙钟会跑得比单调钟快/慢。
+    _driftout=$(python3 -c "
+import time
+a_w, a_m = time.time(), time.monotonic()
+time.sleep($CLOCK_SETTLE)
+b_w, b_m = time.time(), time.monotonic()
+d = (b_w - a_w) - (b_m - a_m)
+print('%s %.3f' % ('OK' if abs(d) < 0.05 else 'BAD', d))" 2>/dev/null)
+    case "$_driftout" in
+        OK*)  printf '  ✅ %-38s %s s (%s s 采样)\n' "时钟未跳变" "${_driftout#OK }" "$CLOCK_SETTLE" ;;
+        BAD*) printf '  ❌ %-38s %s s  <- 正在跳变!\n' "时钟未跳变" "${_driftout#BAD }"; clock_bad=1 ;;
+        *)    printf '  ❌ %-38s %s\n' "时钟未跳变" "检测失败"; clock_bad=1 ;;
+    esac
+
+    if [ "$clock_bad" = "1" ]; then
+        cat <<'MSG'
+
+  ❌ 时钟闸未通过 —— 拒绝启动,不碰 TX1。
+
+     时钟不稳时启动机器人栈,后果是:TF 缓冲被作废 -> 传感器消息被时间过滤器
+     丢光 -> 定位抖动 -> 速度被反复清零 -> 车"收到指令但不动",而且会被误诊成
+     Nav2 的问题。先修时钟,再跑探索。
+
+     确认无碍时可显式跳过:
+       SKIP_CLOCK_CHECK=1 bash tools/r680_explore_up.sh
+MSG
+        exit 1
+    fi
+fi
+
 # ---------------------------------------------------------------- TX1
 # 清理与启动**必须**是分开的 ssh 调用。同一条命令里既有 pkill 的模式又有
 # 待启动脚本的明文路径时,pkill 会匹配到执行它的那个 shell 自己,shell 在
