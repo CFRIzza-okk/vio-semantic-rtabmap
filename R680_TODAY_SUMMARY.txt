@@ -793,3 +793,79 @@ Jetson 的无线网络已更换：
 
 
 
+
+========================================================================
+2026-10-15 补充:ROS 1 环境变量残留导致 RLException
+========================================================================
+
+【报错】
+
+  RLException: Unable to contact my own server at [http://192.168.1.102:40071/].
+  A common cause is that the machine cannot connect to itself.
+
+【根因】
+
+不是网络故障,是 **shell 里留着旧 WiFi 网段的 ROS 环境变量**:
+
+  export ROS_MASTER_URI=http://192.168.1.102:11311
+  export ROS_IP=192.168.1.102
+
+`192.168.1.102` 是 Orin 在旧 WiFi(XTKZ 网段)上的地址。WiFi 换成
+Innovation_Lab(192.168.5.x)后该地址不存在,roslaunch 便把自己宣传成一个
+自己没有的地址,再去联系"自己"时必然失败。
+
+实测对照:
+
+  192.168.1.102        ping 100% 丢包,11311 端口关闭      <- 旧地址,已死
+  192.168.2.102:11311  通,XMLRPC 有响应,master 活着       <- TX1,正确
+
+【正确取值】
+
+  ROS_MASTER_URI = http://192.168.2.102:11311   (TX1 的 ROS 1 master)
+  ROS_IP         = 192.168.2.15                 (Orin 在 eno1 上的实际地址)
+
+已做成脚本:**tools/ros1_env.sh**(source 它即可,且会主动验证 master 可达)。
+
+端到端验证(在 ros:noetic 容器 xtkz 里,host 网络模式):
+
+  ROS_MASTER_URI=http://192.168.2.102:11311  ROS_IP=192.168.2.15
+  -> rostopic list 能看到 TX1 的 9 个话题:
+     /PowerVoltage /cmd_vel /imu /joint_states /odom
+     /robot_pose_ekf/odom_combined /rosout /rosout_agg /tf /tf_static
+
+用旧的错误地址则静默失败,什么都不返回。
+
+【教训 —— 这类故障的形态】
+
+**ROS 的 IP 配置是"环境变量",不是"配置检查"。** 地址错了不会在启动时被
+拦住,只会在一连串后续操作里表现成各种奇怪症状。报错里那句 `ping
+192.168.1.102` 就是 ROS 在提示:去 ping 一下它认为自己应该在的地址。
+
+本项目已经栽过一次同类问题(ros2_relay_node.py 里曾硬编码 192.168.1.102
+这个 WiFi 地址作为对端,不带 yaml 直接跑就会朝错的对端发)。
+
+【⚠️ 重要安全事实:闸门挡不住 ROS 1 直连】
+
+实测 TX1 的 /cmd_vel:
+
+  Publishers:  None             <- 闸门关闭时确实没人发布
+  Subscribers: /wheeltec_robot  <- 但底盘驱动**一直直接听着**
+
+**/wheeltec_robot 直接订阅 /cmd_vel,不经过 relay,也不经过
+tools/r680_gate.sh 那个闸门。**
+
+含义:任何在 TX1 的 ROS 1 master 上发布 /cmd_vel 的节点都会驱动底盘。
+闸门只挡住"Orin 的 relay 发布",挡不住:
+
+  * 在 ROS 1 里跑的 teleop 节点
+  * TX1 自带的导航栈(teb_local_planner 等)
+  * 任何 ROS 1 脚本
+
+**车在充电、或你不打算让它动的时候,不要在 ROS 1 侧发布 /cmd_vel。**
+
+【顺带一个观察】
+
+TX1 的 rostopic list 里**没有 /scan** —— 车上的网口雷达没有在跑
+(而且 TX1 只有 eth0/wlan1 两个接口,没有雷达那个 192.168.1.x 网段,
+物理上也接不上)。本项目目前的 /scan 完全来自 Orin 的 D435 深度相机,
+视野只有 ±27°,侧后方是盲区。如果车上有可用的雷达,值得单独查一下。
