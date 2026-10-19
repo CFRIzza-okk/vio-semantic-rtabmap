@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import random
 import socket
 import threading
 import time
@@ -96,6 +97,19 @@ class Relay(Node):
         self.peer = (str(self.get_parameter("peer_host").value), int(self.get_parameter("tx_port").value))
         self.secret = str(self.get_parameter("secret").value)
         self.cmd_seq = 0
+        # 本进程的身份，给 TX1 侧的序号守卫看。
+        #
+        # cmd_seq 每次进程启动都从 0 开始，而 TX1 只在**它自己**重启时才重置
+        # last_seq。两者重启顺序一旦反过来（启动脚本原先正是如此：闸门在旧的
+        # Orin 栈还活着时就重启了 TX1 中继），TX1 的水位就停在旧进程到达的
+        # 数值上，新进程的每个包都满足 `seq <= last_seq` 而被丢弃，而且**任何
+        # 地方都不打日志**。2026-10-17 实测：旧计数器约 13800，20 Hz 下要等
+        # ~11.5 分钟车才可能再动，而这期间安全链全程报"健康"。
+        #
+        # 每个进程一个新 id，把这段静默期从十几分钟变成零个包。它必须放进被
+        # 签名的 body 里 TX1 才看得见；接收那一半见 tools/ros1_relay.py 的
+        # _accept_cmd_vel()。
+        self.session = "%016x" % random.getrandbits(64)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # SO_REUSEADDR：relay 崩溃/重启后能立刻重新绑定同一端口，不必等内核回收。
         # 与 tools/ros1_ros2_relay_protocol.open_socket 的做法保持一致（TX1 侧一直有）。
@@ -210,7 +224,7 @@ class Relay(Node):
     def send_cmd(self,msg):
         p={"linear":{"x":msg.linear.x,"y":msg.linear.y,"z":msg.linear.z},"angular":{"x":msg.angular.x,"y":msg.angular.y,"z":msg.angular.z}}
         self.cmd_seq += 1
-        body={"kind":"cmd_vel","seq":self.cmd_seq,"payload":p,"sent_at":int(time.time()*1000000000)}; raw=self.canonical(body); packet=json.dumps({"body":body,"sig":self.sign(raw)},separators=(",", ":"),sort_keys=True).encode()
+        body={"kind":"cmd_vel","seq":self.cmd_seq,"session":self.session,"payload":p,"sent_at":int(time.time()*1000000000)}; raw=self.canonical(body); packet=json.dumps({"body":body,"sig":self.sign(raw)},separators=(",", ":"),sort_keys=True).encode()
         try: self.sock.sendto(packet,self.peer)
         except OSError as e: self.get_logger().warning("relay send failed: %s" % e)
     def destroy_node(self):

@@ -92,6 +92,48 @@ except ImportError:                                  # pragma: no cover - py2
 _SOCKET_ERRORS = (OSError, socket.error)
 
 
+def _accept_cmd_vel(last_seq, last_session, session, seq):
+    """Decide whether one cmd_vel packet may advance the downlink.
+
+    Returns ``(accepted, last_seq, last_session)``.
+
+    The rule is "strictly increasing sequence", plus ONE escape hatch: a packet
+    from a different *sender instance* re-baselines the counter instead of being
+    compared against the previous instance's water mark.
+
+    Why the escape hatch exists
+    ---------------------------
+    The Orin's relay node numbers its cmd_vel packets from 0 on every process
+    start. The TX1 relay only re-baselines when *it* restarts. So whenever the
+    two are restarted in the other order -- which is exactly what the startup
+    scripts used to do, opening the gate (restarting this relay) while the
+    previous Orin stack was still running -- the new sender's counter starts far
+    below the stale water mark left by the old one:
+
+        old sender reached seq 13800  ->  last_seq = 13800
+        new sender starts at seq 0    ->  seq <= last_seq for 13800 packets
+
+    At the sender's 20 Hz that is a ~11.5 minute window in which EVERY velocity
+    command is dropped, silently: `continue` here logs nothing, the watchdog
+    keeps publishing zeros, the uplink (odom/tf/battery) is unaffected, so
+    `localization_valid` stays true and the safety chain reports healthy. To
+    every observer the robot simply refuses to move, and a 90 s exploration
+    budget expires inside the blackout. That is not a hypothetical: it is what
+    the 2026-10-17 autonomous run did, twice.
+
+    A session id makes the sender's restart visible, so the blackout lasts no
+    packets at all. The guard keeps its real job -- dropping duplicates and
+    out-of-order stragglers within a session, which is all it can be, since
+    anyone able to forge a packet also holds the HMAC key and could send any
+    sequence they liked.
+    """
+    if session != last_session:
+        last_session, last_seq = session, -1
+    if seq <= last_seq:
+        return False, last_seq, last_session
+    return True, seq, last_session
+
+
 def _is_finite(value):
     """Return True when ``value`` is neither NaN nor infinite.
 
@@ -118,6 +160,10 @@ class Relay:
         self.sock.settimeout(0.2)
         self.last_cmd = 0.0
         self.last_seq = -1
+        # Which sender instance the sequence above belongs to. See
+        # _accept_cmd_vel(): without this the counter of a *restarted* sender
+        # is compared against the previous instance's high-water mark.
+        self.session = None
         self.cmd_pub = rospy.Publisher("/cmd_vel", Twist, queue_size=10) if self.enable_cmd_vel else None
         self.zero_cmd = Twist()
 
@@ -272,7 +318,10 @@ class Relay:
                         or body.get("kind") != "cmd_vel": continue
                 if not self.enable_cmd_vel: continue
                 seq = int(body.get("seq", -1))
-                if seq <= self.last_seq: continue
+                session = str(body.get("session", ""))
+                accepted, self.last_seq, self.session = _accept_cmd_vel(
+                    self.last_seq, self.session, session, seq)
+                if not accepted: continue
                 t = body["payload"]; msg = Twist()
                 for axis in ("x", "y", "z"):
                     setattr(msg.linear, axis, float(t["linear"].get(axis, 0.0)))
