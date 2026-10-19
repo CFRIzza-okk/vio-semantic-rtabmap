@@ -104,6 +104,20 @@ roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch \
   car_mode:=mini_mec navigation:=false pure3d_nav:=false repeat:=false
 ```
 
+> **2026-10-17 修订 —— 先单独起 master，再起驱动：**
+> ```bash
+> nohup roscore > /home/wheeltec/roscore.log 2>&1 &     # 单独一个进程，不属于任何 roslaunch
+> nohup roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch \
+>   car_mode:=mini_mec navigation:=false pure3d_nav:=false repeat:=false &
+> ```
+> 直接 `roslaunch` 的话，它会**自己拉起一个 rosmaster 并把那个 master 变成自己的
+> 子进程** —— 两者同生共死。这个 roslaunch 一退（或按 Ctrl-C），master 跟着死；而
+> 此时还活着的 rospy 节点（relay、`tx1_power_log.py`）**不会重新注册**，于是从
+> `rosnode list` 里消失、什么也收不到，却**没有任何报错** —— 只有进程表看得出来。
+> 先起独立 roscore，驱动的 roslaunch 就会挂到已有的 master 上，以后重启驱动不必
+> 再重启 master。`tools/r680_*_up.sh` 里的「1b」步做的就是这件事，
+> `tools/r680_down.sh` 也已经会拆掉这棵独立的 master 树（roscore / rosmaster / rosout）。
+
 **TX1**（终端 2）：relay，**注意 `enable_cmd_vel` 保持默认关闭**：
 ```bash
 . /opt/ros/melodic/setup.bash

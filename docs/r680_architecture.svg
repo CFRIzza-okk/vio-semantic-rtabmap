@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1420" viewBox="0 0 2200 1420" font-family="Noto Sans CJK SC, Noto Sans CJK JP, sans-serif">
+<rect width="100%" height="100%" fill="#FFFFFF"/>
+<g id="title">
+<text x="96" y="52" font-size="30" font-weight="bold" fill="#212529">R680 麦克纳姆轮小车 · 自主探索系统分层架构</text>
+<text x="96" y="88" font-size="15" fill="#6C757D">两机异构:Orin NX 承担感知与决策(ROS 2 Humble, ROS_DOMAIN_ID=99)  ·  TX1 承担底盘执行(ROS 1 Melodic)  ·  跨机以自研 UDP 中继连接</text>
+</g>
+<g id="lanes">
+<rect x="82" y="118" width="2100" height="230" rx="10" fill="#F7F8FA" stroke="#E9ECEF"/>
+<rect x="14" y="118" width="58" height="230" rx="8" fill="#2F6FED"/>
+<text x="32.5" y="216.0" font-size="19" font-weight="500" fill="#FFFFFF">感</text>
+<text x="32.5" y="238.0" font-size="19" font-weight="500" fill="#FFFFFF">知</text>
+<text x="32.5" y="260.0" font-size="19" font-weight="500" fill="#FFFFFF">层</text>
+<rect x="82" y="360" width="2100" height="230" rx="10" fill="#F7F8FA" stroke="#E9ECEF"/>
+<rect x="14" y="360" width="58" height="230" rx="8" fill="#12A594"/>
+<text x="32.5" y="458.0" font-size="19" font-weight="500" fill="#FFFFFF">规</text>
+<text x="32.5" y="480.0" font-size="19" font-weight="500" fill="#FFFFFF">划</text>
+<text x="32.5" y="502.0" font-size="19" font-weight="500" fill="#FFFFFF">层</text>
+<rect x="82" y="602" width="2100" height="230" rx="10" fill="#F7F8FA" stroke="#E9ECEF"/>
+<rect x="14" y="602" width="58" height="230" rx="8" fill="#E8590C"/>
+<text x="32.5" y="700.0" font-size="19" font-weight="500" fill="#FFFFFF">控</text>
+<text x="32.5" y="722.0" font-size="19" font-weight="500" fill="#FFFFFF">制</text>
+<text x="32.5" y="744.0" font-size="19" font-weight="500" fill="#FFFFFF">层</text>
+<rect x="82" y="844" width="2100" height="230" rx="10" fill="#F7F8FA" stroke="#E9ECEF"/>
+<rect x="14" y="844" width="58" height="230" rx="8" fill="#495057"/>
+<text x="32.5" y="920.0" font-size="19" font-weight="500" fill="#FFFFFF">执</text>
+<text x="32.5" y="942.0" font-size="19" font-weight="500" fill="#FFFFFF">行</text>
+<text x="32.5" y="964.0" font-size="19" font-weight="500" fill="#FFFFFF">与</text>
+<text x="32.5" y="986.0" font-size="19" font-weight="500" fill="#FFFFFF">硬</text>
+<text x="32.5" y="1008.0" font-size="19" font-weight="500" fill="#FFFFFF">件</text>
+<rect x="82" y="1086" width="2100" height="230" rx="10" fill="#F7F8FA" stroke="#E9ECEF"/>
+<rect x="14" y="1086" width="58" height="230" rx="8" fill="#7048E8"/>
+<text x="32.5" y="1162.0" font-size="19" font-weight="500" fill="#FFFFFF">编</text>
+<text x="32.5" y="1184.0" font-size="19" font-weight="500" fill="#FFFFFF">排</text>
+<text x="32.5" y="1206.0" font-size="19" font-weight="500" fill="#FFFFFF">与</text>
+<text x="32.5" y="1228.0" font-size="19" font-weight="500" fill="#FFFFFF">工</text>
+<text x="32.5" y="1250.0" font-size="19" font-weight="500" fill="#FFFFFF">具</text>
+</g>
+<g id="hosts">
+<text x="104" y="92" font-size="15" fill="#6C757D">Orin NX · ROS 2 Humble</text>
+<text x="1338" y="92" font-size="15" fill="#6C757D">TX1 · ROS 1 Melodic</text>
+</g>
+<g id="channel">
+<rect x="1202" y="112" width="116" height="1204" rx="12" fill="#F1F3F5" stroke="#CED4DA"/>
+<text x="1210" y="144" font-size="13" font-weight="500" fill="#6C757D">U</text>
+<text x="1210" y="160" font-size="13" font-weight="500" fill="#6C757D">D</text>
+<text x="1210" y="176" font-size="13" font-weight="500" fill="#6C757D">P</text>
+<text x="1210" y="192" font-size="13" font-weight="500" fill="#6C757D"> </text>
+<text x="1210" y="208" font-size="13" font-weight="500" fill="#6C757D">跨</text>
+<text x="1210" y="224" font-size="13" font-weight="500" fill="#6C757D">机</text>
+<text x="1210" y="240" font-size="13" font-weight="500" fill="#6C757D">中</text>
+<text x="1210" y="256" font-size="13" font-weight="500" fill="#6C757D">继</text>
+</g>
+<g id="boxes">
+<rect x="110" y="144" width="250" height="97" rx="8" fill="#FFFFFF" stroke="#2F6FED" stroke-width="2"/>
+<rect x="110" y="144" width="4" height="97" rx="2" fill="#2F6FED"/>
+<text x="123" y="169" font-size="16" font-weight="500" fill="#212529">Intel RealSense D435</text>
+<text x="123" y="191" font-size="13" fill="#6C757D">彩色图 + 对齐深度 + 原始点云</text>
+<text x="123" y="208" font-size="13" fill="#6C757D">USB3 · 唯一避障传感器</text>
+<text x="123" y="225" font-size="13" fill="#D9480F">可靠深度 ≈ 3 m</text>
+<rect x="396" y="144" width="268" height="97" rx="8" fill="#FFFFFF" stroke="#2F6FED" stroke-width="2"/>
+<rect x="396" y="144" width="4" height="97" rx="2" fill="#2F6FED"/>
+<text x="409" y="169" font-size="16" font-weight="500" fill="#212529">depthimage_to_laserscan</text>
+<text x="409" y="191" font-size="13" fill="#6C757D">→ /scan  (LaserScan)</text>
+<text x="409" y="208" font-size="13" fill="#6C757D">scan_height 5 · 0.25–6.0 m</text>
+<text x="409" y="225" font-size="13" fill="#6C757D">output_frame camera_depth_frame</text>
+<rect x="700" y="144" width="268" height="114" rx="8" fill="#FFFFFF" stroke="#2F6FED" stroke-width="2"/>
+<rect x="700" y="144" width="4" height="114" rx="2" fill="#2F6FED"/>
+<text x="713" y="169" font-size="16" font-weight="500" fill="#212529">RTAB-Map  RGB-D SLAM</text>
+<text x="713" y="191" font-size="13" fill="#6C757D">视觉里程计关闭,唯一源 = /odom</text>
+<text x="713" y="208" font-size="13" fill="#6C757D">发布 map → odom_combined</text>
+<text x="713" y="225" font-size="13" fill="#6C757D">/rtabmap/map · cloud_map</text>
+<text x="713" y="242" font-size="13" fill="#6C757D">/rtabmap/localization_pose</text>
+<rect x="1004" y="144" width="168" height="97" rx="8" fill="#FFFFFF" stroke="#6C757D" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="1004" y="144" width="4" height="97" rx="2" fill="#6C757D"/>
+<text x="1017" y="169" font-size="16" font-weight="500" fill="#212529">语义检测 YOLO11n</text>
+<text x="1017" y="191" font-size="13" fill="#6C757D">TensorRT · 52 FPS</text>
+<text x="1017" y="208" font-size="13" fill="#6C757D">匈牙利关联</text>
+<text x="1017" y="225" font-size="13" fill="#6C757D">min_observations 3</text>
+<rect x="110" y="386" width="400" height="131" rx="8" fill="#FFFFFF" stroke="#12A594" stroke-width="2"/>
+<rect x="110" y="386" width="4" height="131" rx="2" fill="#12A594"/>
+<text x="123" y="411" font-size="16" font-weight="500" fill="#212529">frontier 探索器  r680_explorer</text>
+<text x="123" y="433" font-size="13" fill="#6C757D">score = 1.0·size + 1.5·gain − 1.0·dist − 0.6·heading/π</text>
+<text x="123" y="450" font-size="13" fill="#D9480F">gain 权重最高:优先「能新看到最多未知」而非最近</text>
+<text x="123" y="467" font-size="13" fill="#6C757D">min_frontier_size 10 · max_goal_distance 6.0 m</text>
+<text x="123" y="484" font-size="13" fill="#6C757D">goal_clearance 0.25 · require_reachable true</text>
+<text x="123" y="501" font-size="13" fill="#6C757D">IDLE → EXPLORING ⇄ PAUSED → COMPLETE / ABORTED</text>
+<rect x="544" y="386" width="628" height="131" rx="8" fill="#FFFFFF" stroke="#12A594" stroke-width="2"/>
+<rect x="544" y="386" width="4" height="131" rx="2" fill="#12A594"/>
+<text x="557" y="411" font-size="16" font-weight="500" fill="#212529">Nav2  ·  controller / planner / bt_navigator / behavior / waypoint / lifecycle</text>
+<text x="557" y="433" font-size="13" fill="#6C757D">动作接口 navigate_to_pose(NavigateToPose)  ← 来自探索器</text>
+<text x="557" y="450" font-size="13" fill="#6C757D">规划器 NavFn(A*)  ·  控制器 MPPI  ·  xy_goal_tolerance 0.20</text>
+<text x="557" y="467" font-size="13" fill="#6C757D">全局代价地图  static_layer(/rtabmap/map) + obstacle(/scan) + inflation 0.35</text>
+<text x="557" y="484" font-size="13" fill="#6C757D">局部代价地图  4×4 m rolling · global_frame odom_combined · 仅 /scan · 无 voxel 层</text>
+<text x="557" y="501" font-size="13" fill="#D9480F">robot_radius 0.20 = 0.5·√(0.30²+0.25²) 上取整,两处 costmap 必须同值</text>
+<rect x="110" y="618" width="258" height="100" rx="8" fill="#FFFFFF" stroke="#E8590C" stroke-width="2"/>
+<rect x="110" y="618" width="4" height="100" rx="2" fill="#E8590C"/>
+<text x="120" y="640" font-size="16" font-weight="500" fill="#212529">localization_monitor</text>
+<text x="120" y="662" font-size="13" fill="#6C757D">任一段 0.5 s 超时即判定位失效</text>
+<text x="120" y="677" font-size="13" fill="#6C757D">map → odom_combined →</text>
+<text x="120" y="692" font-size="13" fill="#6C757D">base_footprint</text>
+<text x="120" y="707" font-size="13" fill="#6C757D">→ /safety/localization_valid</text>
+<rect x="110" y="724" width="258" height="100" rx="8" fill="#FFFFFF" stroke="#E8590C" stroke-width="2"/>
+<rect x="110" y="724" width="4" height="100" rx="2" fill="#E8590C"/>
+<text x="120" y="746" font-size="16" font-weight="500" fill="#212529">obstacle_monitor</text>
+<text x="120" y="768" font-size="13" fill="#6C757D">前向扇区 50° · stop 0.45 m</text>
+<text x="120" y="783" font-size="13" fill="#6C757D">slow 0.80 m</text>
+<text x="120" y="798" font-size="13" fill="#D9480F">无 /scan 数据即视为「有障碍」</text>
+<text x="120" y="813" font-size="13" fill="#6C757D">→ /safety/obstacle_stop</text>
+<rect x="396" y="618" width="148" height="80" rx="8" fill="#FFF4F0" stroke="#D9480F" stroke-width="3"/>
+<rect x="396" y="618" width="4" height="80" rx="2" fill="#D9480F"/>
+<text x="409" y="643" font-size="16" font-weight="bold" fill="#212529">安全急停</text>
+<text x="409" y="665" font-size="13" fill="#6C757D">/safety/estop</text>
+<text x="409" y="682" font-size="13" fill="#6C757D">最高优先级</text>
+<rect x="396" y="712" width="372" height="97" rx="8" fill="#FFFFFF" stroke="#E8590C" stroke-width="2"/>
+<rect x="396" y="712" width="4" height="97" rx="2" fill="#E8590C"/>
+<text x="409" y="737" font-size="16" font-weight="500" fill="#212529">cmd_vel_safety  ·  逐级收紧</text>
+<text x="409" y="759" font-size="13" fill="#6C757D">限速 0.35 / 0.35 / 0.8 m·s⁻¹  ·  指令超时 0.5 s</text>
+<text x="409" y="776" font-size="13" fill="#D9480F">障碍只封平移,保留 0.30 rad/s 原地旋转脱困</text>
+<text x="409" y="793" font-size="13" fill="#6C757D">输出 /cmd_vel_safe + /safety/stop_reason</text>
+<rect x="796" y="712" width="168" height="80" rx="8" fill="#FFFFFF" stroke="#E8590C" stroke-width="2"/>
+<rect x="796" y="712" width="4" height="80" rx="2" fill="#E8590C"/>
+<text x="809" y="737" font-size="16" font-weight="500" fill="#212529">ROS 2 中继</text>
+<text x="809" y="758" font-size="12" fill="#6C757D">ros2_relay_node</text>
+<text x="809" y="775" font-size="12" fill="#6C757D">绑 19001 → 发 19000</text>
+<rect x="1344" y="712" width="176" height="97" rx="8" fill="#FFFFFF" stroke="#E8590C" stroke-width="2"/>
+<rect x="1344" y="712" width="4" height="97" rx="2" fill="#E8590C"/>
+<text x="1357" y="737" font-size="16" font-weight="500" fill="#212529">ROS 1 中继</text>
+<text x="1357" y="758" font-size="12" fill="#6C757D">ros1_relay.py</text>
+<text x="1357" y="775" font-size="12" fill="#6C757D">绑 19000 ← 收 Orin</text>
+<text x="1357" y="792" font-size="12" fill="#D9480F">_enable_cmd_vel 闸门</text>
+<rect x="1542" y="712" width="190" height="97" rx="8" fill="#FFFFFF" stroke="#495057" stroke-width="2"/>
+<rect x="1542" y="712" width="4" height="97" rx="2" fill="#495057"/>
+<text x="1555" y="737" font-size="16" font-weight="500" fill="#212529">/cmd_vel</text>
+<text x="1555" y="758" font-size="12" fill="#6C757D">geometry_msgs/Twist</text>
+<text x="1555" y="775" font-size="12" fill="#6C757D">闸门关时</text>
+<text x="1555" y="792" font-size="12" fill="#D9480F">Publishers: None</text>
+<rect x="1344" y="870" width="200" height="97" rx="8" fill="#FFFFFF" stroke="#495057" stroke-width="2"/>
+<rect x="1344" y="870" width="4" height="97" rx="2" fill="#495057"/>
+<text x="1357" y="895" font-size="16" font-weight="500" fill="#212529">wheeltec_robot 驱动</text>
+<text x="1357" y="917" font-size="13" fill="#6C757D">订阅 /cmd_vel</text>
+<text x="1357" y="934" font-size="13" fill="#D9480F">只在收到消息时写串口帧</text>
+<text x="1357" y="951" font-size="13" fill="#D9480F">这条路径上没有看门狗</text>
+<rect x="1568" y="870" width="150" height="80" rx="8" fill="#FFFFFF" stroke="#495057" stroke-width="2"/>
+<rect x="1568" y="870" width="4" height="80" rx="2" fill="#495057"/>
+<text x="1581" y="895" font-size="16" font-weight="500" fill="#212529">CP2102</text>
+<text x="1581" y="917" font-size="13" fill="#6C757D">/dev/ttyUSB0</text>
+<text x="1581" y="934" font-size="13" fill="#6C757D">串口</text>
+<rect x="1742" y="870" width="130" height="80" rx="8" fill="#FFFFFF" stroke="#495057" stroke-width="2"/>
+<rect x="1742" y="870" width="4" height="80" rx="2" fill="#495057"/>
+<text x="1755" y="895" font-size="16" font-weight="500" fill="#212529">MCU</text>
+<text x="1755" y="917" font-size="13" fill="#6C757D">电机闭环</text>
+<text x="1755" y="934" font-size="13" fill="#6C757D">速度保持</text>
+<rect x="1896" y="870" width="210" height="97" rx="8" fill="#FFFFFF" stroke="#495057" stroke-width="2"/>
+<rect x="1896" y="870" width="4" height="97" rx="2" fill="#495057"/>
+<text x="1909" y="895" font-size="16" font-weight="500" fill="#212529">麦克纳姆轮 ×4</text>
+<text x="1909" y="917" font-size="13" fill="#6C757D">编码器 → /odom</text>
+<text x="1909" y="934" font-size="13" fill="#6C757D">IMU → /imu</text>
+<text x="1909" y="951" font-size="13" fill="#6C757D">电池采样 → /PowerVoltage</text>
+<rect x="1344" y="968" width="762" height="97" rx="8" fill="#FFFFFF" stroke="#495057" stroke-width="2"/>
+<rect x="1344" y="968" width="4" height="97" rx="2" fill="#495057"/>
+<text x="1357" y="993" font-size="16" font-weight="500" fill="#212529">TX1 侧唯一的定位输入:轮式里程计</text>
+<text x="1357" y="1014" font-size="12" fill="#6C757D">planar_odom_covariance=true 把 z/roll/pitch 的 1e6 哨兵换成有限值</text>
+<text x="1357" y="1031" font-size="12" fill="#6C757D">不这么做:RTAB-Map 报 Very large angular variance,图优化变差、错误回环更易被接受</text>
+<text x="1357" y="1048" font-size="12" fill="#6C757D">前提是车只跑平地(操作者已确认)</text>
+<rect x="96" y="1112" width="172" height="91" rx="8" fill="#FFFFFF" stroke="#7048E8" stroke-width="2"/>
+<rect x="96" y="1112" width="4" height="91" rx="2" fill="#7048E8"/>
+<text x="109" y="1134" font-size="13" font-weight="500" fill="#212529">r680_explore_up.sh</text>
+<text x="109" y="1155" font-size="12" fill="#6C757D">整栈启动</text>
+<text x="109" y="1171" font-size="12" fill="#6C757D">TX1: roscore→驱动→闸门</text>
+<text x="109" y="1187" font-size="12" fill="#6C757D">Orin: 清理→感知→规划</text>
+<rect x="276" y="1112" width="172" height="91" rx="8" fill="#FFFFFF" stroke="#7048E8" stroke-width="2"/>
+<rect x="276" y="1112" width="4" height="91" rx="2" fill="#7048E8"/>
+<text x="289" y="1134" font-size="13" font-weight="500" fill="#212529">r680_explore_300.sh</text>
+<text x="289" y="1155" font-size="12" fill="#6C757D">300 s 探索编排</text>
+<text x="289" y="1171" font-size="12" fill="#6C757D">默认需输 GO</text>
+<text x="289" y="1187" font-size="12" fill="#6C757D">120 s 仍 74.4% 未知</text>
+<rect x="456" y="1112" width="172" height="91" rx="8" fill="#FFFFFF" stroke="#7048E8" stroke-width="2"/>
+<rect x="456" y="1112" width="4" height="91" rx="2" fill="#7048E8"/>
+<text x="469" y="1134" font-size="13" font-weight="500" fill="#212529">r680_down.sh</text>
+<text x="469" y="1155" font-size="12" fill="#6C757D">分级收尾</text>
+<text x="469" y="1171" font-size="12" fill="#6C757D">先急停+关闸+验证</text>
+<text x="469" y="1187" font-size="12" fill="#6C757D">再拆 Orin,最后拆 TX1</text>
+<rect x="636" y="1112" width="172" height="91" rx="8" fill="#FFFFFF" stroke="#7048E8" stroke-width="2"/>
+<rect x="636" y="1112" width="4" height="91" rx="2" fill="#7048E8"/>
+<text x="649" y="1134" font-size="13" font-weight="500" fill="#212529">r680_gate.sh</text>
+<text x="649" y="1155" font-size="12" fill="#6C757D">运动闸门开关</text>
+<text x="649" y="1171" font-size="12" fill="#6C757D">判据: /cmd_vel</text>
+<text x="649" y="1187" font-size="12" fill="#6C757D">Publishers = None</text>
+<rect x="816" y="1112" width="172" height="91" rx="8" fill="#FFFFFF" stroke="#7048E8" stroke-width="2"/>
+<rect x="816" y="1112" width="4" height="91" rx="2" fill="#7048E8"/>
+<text x="829" y="1134" font-size="13" font-weight="500" fill="#212529">start_foxglove.sh</text>
+<text x="829" y="1155" font-size="12" fill="#6C757D">foxglove_bridge :8765</text>
+<text x="829" y="1171" font-size="12" fill="#6C757D">远程 3D 可视化</text>
+<text x="829" y="1187" font-size="12" fill="#6C757D">Fixed Frame = map</text>
+<rect x="996" y="1112" width="172" height="91" rx="8" fill="#FFFFFF" stroke="#7048E8" stroke-width="2"/>
+<rect x="996" y="1112" width="4" height="91" rx="2" fill="#7048E8"/>
+<text x="1009" y="1134" font-size="13" font-weight="500" fill="#212529">Foxglove 桌面版</text>
+<text x="1009" y="1155" font-size="12" fill="#6C757D">另一台电脑打开</text>
+<text x="1009" y="1171" font-size="12" fill="#6C757D">ws://&lt;orin-ip&gt;:8765</text>
+<text x="1009" y="1187" font-size="12" fill="#6C757D">/scan · costmap</text>
+<rect x="1344" y="144" width="470" height="97" rx="8" fill="#FFFFFF" stroke="#6C757D" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="1344" y="144" width="4" height="97" rx="2" fill="#6C757D"/>
+<text x="1357" y="169" font-size="16" font-weight="500" fill="#212529">TX1 · 无感知节点</text>
+<text x="1357" y="190" font-size="12" fill="#6C757D">TX1 只跑底盘驱动、电压记录与中继</text>
+<text x="1357" y="207" font-size="12" fill="#6C757D">感知全在 Orin:相机、SLAM、语义检测</text>
+<text x="1357" y="224" font-size="12" fill="#D9480F">这是算力划分的结果,不是功能遗漏</text>
+<rect x="110" y="870" width="560" height="97" rx="8" fill="#FFFFFF" stroke="#6C757D" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="110" y="870" width="4" height="97" rx="2" fill="#6C757D"/>
+<text x="123" y="895" font-size="16" font-weight="500" fill="#212529">Orin · 不直接接触执行器</text>
+<text x="123" y="916" font-size="12" fill="#6C757D">所有速度指令都必须经 UDP 中继下到 TX1</text>
+<text x="123" y="933" font-size="12" fill="#6C757D">Orin 上不存在 /dev/ttyUSB0,也不该有写权限</text>
+<text x="123" y="950" font-size="12" fill="#D9480F">控制权与执行权分离 = 物理隔离的安全边界</text>
+<rect x="1344" y="1112" width="520" height="80" rx="8" fill="#FFFFFF" stroke="#6C757D" stroke-width="2" stroke-dasharray="7 5"/>
+<rect x="1344" y="1112" width="4" height="80" rx="2" fill="#6C757D"/>
+<text x="1357" y="1137" font-size="16" font-weight="500" fill="#212529">TX1 · 不留编排逻辑</text>
+<text x="1357" y="1158" font-size="12" fill="#6C757D">tools/*.sh 都在 Orin 上执行,通过 ssh 操作 TX1</text>
+<text x="1357" y="1175" font-size="12" fill="#6C757D">TX1 上只留有状态的进程(驱动 / 中继 / 电压记录)</text>
+<rect x="1344" y="386" width="470" height="114" rx="8" fill="#FFFFFF" stroke="#D9480F" stroke-width="2"/>
+<rect x="1344" y="386" width="4" height="114" rx="2" fill="#D9480F"/>
+<text x="1357" y="411" font-size="16" font-weight="500" fill="#212529">低电压守卫(在探索器内)</text>
+<text x="1357" y="432" font-size="12" fill="#6C757D">输入 /battery_voltage ← TX1 的 /PowerVoltage</text>
+<text x="1357" y="449" font-size="12" fill="#6C757D">min_battery 10.5 V(3S 锂电保守下限)</text>
+<text x="1357" y="466" font-size="12" fill="#6C757D">battery_timeout 5.0 s —— 覆盖 relay 挂掉后仍拿旧值报正常</text>
+<text x="1357" y="483" font-size="12" fill="#D9480F">不打开不是少个提示:电量耗尽时探索不会停,整场会话中断</text>
+</g>
+<g id="badges">
+<rect x="1017" y="133" width="146" height="20" rx="5" fill="#FFF4F0" stroke="#D9480F"/>
+<text x="1024" y="147" font-size="11" fill="#D9480F">独立链路 · 未接入探索回路</text>
+</g>
+<defs>
+<marker id="a-dark" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#343A40"/></marker>
+<marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2F6FED"/></marker>
+<marker id="a-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#12A594"/></marker>
+<marker id="a-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#E8590C"/></marker>
+<marker id="a-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#495057"/></marker>
+<marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#D9480F"/></marker>
+<marker id="a-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7048E8"/></marker>
+</defs>
+<g id="edges" fill="none">
+<polyline points="360,192 396,192" stroke="#2F6FED" stroke-width="2" marker-end="url(#a-blue)"/>
+<polyline points="664,192 700,192" stroke="#2F6FED" stroke-width="2" marker-end="url(#a-blue)"/>
+<polyline points="968,201 1004,201" stroke="#6C757D" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#a-dark)"/>
+<polyline points="530,241 530,258 68,258 68,774 110,774" stroke="#E8590C" stroke-width="2" marker-end="url(#a-orange)"/>
+<rect x="282" y="249" width="36" height="17" fill="#FFFFFF"/>
+<text x="286" y="263" font-size="11" fill="#E8590C" text-anchor="start">/scan</text>
+<polyline points="834,258 834,386" stroke="#12A594" stroke-width="2" marker-end="url(#a-teal)"/>
+<rect x="792" y="313" width="84" height="17" fill="#FFFFFF"/>
+<text x="796" y="327" font-size="11" fill="#12A594" text-anchor="start">/rtabmap/map</text>
+<polyline points="510,451 544,451" stroke="#12A594" stroke-width="2" marker-end="url(#a-teal)"/>
+<polyline points="664,517 664,712" stroke="#E8590C" stroke-width="2" marker-end="url(#a-orange)"/>
+<rect x="624" y="606" width="80" height="17" fill="#FFFFFF"/>
+<text x="628" y="620" font-size="11" fill="#E8590C" text-anchor="start">/cmd_vel_nav</text>
+<polyline points="368,774 396,774" stroke="#E8590C" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#a-orange)"/>
+<polyline points="368,668 382,668 382,746 396,746" stroke="#E8590C" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#a-orange)"/>
+<polyline points="470,698 470,712" stroke="#D9480F" stroke-width="3" marker-end="url(#a-red)"/>
+<polyline points="768,760 796,760" stroke="#E8590C" stroke-width="2" marker-end="url(#a-orange)"/>
+<polyline points="964,752 1344,752" stroke="#E8590C" stroke-width="3" marker-end="url(#a-orange)"/>
+<rect x="1012" y="743" width="283" height="17" fill="#FFFFFF"/>
+<text x="1016" y="757" font-size="11" fill="#E8590C" text-anchor="start">UDP 19000/19001 · 双向 · 速度↓ / 里程计·IMU·电压↑</text>
+<polyline points="1520,760 1542,760" stroke="#E8590C" stroke-width="2" marker-end="url(#a-orange)"/>
+<polyline points="1637,809 1637,845 1444,845 1444,870" stroke="#495057" stroke-width="2" marker-end="url(#a-gray)"/>
+<polyline points="1544,918 1568,918" stroke="#495057" stroke-width="2" marker-end="url(#a-gray)"/>
+<polyline points="1718,910 1742,910" stroke="#495057" stroke-width="2" marker-end="url(#a-gray)"/>
+<polyline points="1872,910 1896,910" stroke="#495057" stroke-width="2" marker-end="url(#a-gray)"/>
+</g>
+<g id="legend">
+<rect x="1640" y="1324" width="530" height="72" rx="8" fill="#FFFFFF" stroke="#DEE2E6"/>
+<line x1="1654" y1="1346" x2="1694" y2="1346" stroke="#343A40" stroke-width="2"/>
+<text x="1702" y="1350" font-size="12" fill="#6C757D">实线 = 数据流</text>
+<line x1="1830" y1="1346" x2="1870" y2="1346" stroke="#343A40" stroke-width="2" stroke-dasharray="7 5"/>
+<text x="1878" y="1350" font-size="12" fill="#6C757D">虚线 = 控制 / 开关 / 回环</text>
+<rect x="2040" y="1337" width="18" height="18" rx="3" fill="#FFF4F0" stroke="#D9480F" stroke-width="2"/>
+<text x="2066" y="1350" font-size="12" fill="#D9480F">琥珀 = 防御性设计</text>
+</g>
+</svg>
