@@ -11,6 +11,12 @@ cmd_vel_safety:
     localization_timeout: 0.5
     stop_on_obstacle: true
     require_localization: true
+    # 障碍锁存时允许"只转不走"的脱困旋转。理由见 cmd_vel_safety_node.py：
+    # 整个 Twist 全零会让车头进入 0.45 m 死角后永久锁死
+    # （实测第二轮 66 s 卡死 -> 连续 5 次目标超时 -> ABORTED）。
+    # 平移分量恒为 0，这条不变量不受本参数影响。
+    obstacle_escape_rotation: true
+    obstacle_escape_angular_z: 0.30
 
 # Use the TX1 odometry as the first-stage local odometry source.
 # The ROS 1 bridge must expose these names and only one node may publish odom->base_footprint.

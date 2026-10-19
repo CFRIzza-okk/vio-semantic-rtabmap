@@ -36,6 +36,23 @@ class CmdVelSafetyNode(Node):
         self.declare_parameter("localization_timeout", 0.5)
         self.declare_parameter("stop_on_obstacle", True)
         self.declare_parameter("require_localization", True)
+        # 障碍锁存时是否允许"只转不走"的脱困旋转。
+        #
+        # 为什么需要它：障碍监视器只看**正前方 ±30°、0.45 m** 的扇区。命中后
+        # 若把整个 Twist 置零（包括 angular.z），车就再也转不动了 —— 连 Nav2
+        # 自己的 spin/backup 恢复行为也被清零，于是车头一旦进入近距死角就
+        # **永久锁死**，只能人工把车挪开。实测：第二轮 66 s 卡死 -> 连续 5 次
+        # 目标超时 -> ABORTED。
+        #
+        # 为什么"只转"是安全的：旋转不产生位移，不会把车带进任何**未测量**的
+        # 区域（这正是它区别于倒车的地方 —— 倒车是朝未知方向平移，本工程一律
+        # 不做）。而且它给出了唯一一条能自己走出死角的路径：转开 -> 前扇区变
+        # 空 -> obstacle_stop 解除 -> 恢复通行。
+        #
+        # 仍然被严格封死的：linear.x / linear.y 恒为 0。也就是说障碍锁存期间
+        # **车一步都不会朝前或朝侧面移动**，这是本参数不改变的硬性质。
+        self.declare_parameter("obstacle_escape_rotation", True)
+        self.declare_parameter("obstacle_escape_angular_z", 0.30)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._input: Optional[Twist] = None
@@ -79,20 +96,38 @@ class CmdVelSafetyNode(Node):
         now = self._now()
         timeout_ns = int(float(self.get_parameter("command_timeout").value) * 1e9)
         localization_timeout_ns = int(float(self.get_parameter("localization_timeout").value) * 1e9)
-        reason = "ok"
         source = self._input
+        # A command is only usable while it is fresh. This is checked BEFORE the
+        # obstacle branch on purpose: the escape rotation below forwards a
+        # rotation command, and forwarding a stale one would be motion based on
+        # a decision the planner may already have abandoned.
+        fresh = source is not None and now - self._input_ns <= timeout_ns
+        reason = "ok"
         output = self._zero()
 
+        # Priority matters, and "stop everything" always wins. Only when none of
+        # the three hard stops applies can an obstacle be answered with a
+        # rotation instead of a full stop. Putting the obstacle branch first (as
+        # this did before escape rotation existed) would have let a robot that
+        # cannot localize, or whose e-stop is pressed, or whose planner has gone
+        # silent, still spin in place.
         if self._estop.value:
             reason = "emergency_stop"
-        elif bool(self.get_parameter("stop_on_obstacle").value) and self._obstacle.value:
-            reason = "obstacle_stop"
         elif bool(self.get_parameter("require_localization").value) and (
             not self._localized.value or now - self._localized.stamp_ns > localization_timeout_ns
         ):
             reason = "localization_invalid_or_timeout"
-        elif source is None or now - self._input_ns > timeout_ns:
+        elif not fresh:
             reason = "cmd_vel_timeout"
+        elif bool(self.get_parameter("stop_on_obstacle").value) and self._obstacle.value:
+            if bool(self.get_parameter("obstacle_escape_rotation").value):
+                # Translation stays at zero -- that is the invariant that makes
+                # this safe. Only yaw is passed, and only up to the escape cap.
+                cap = abs(float(self.get_parameter("obstacle_escape_angular_z").value))
+                output.angular.z = max(-cap, min(cap, source.angular.z))
+                reason = "obstacle_stop_escape_rotation"
+            else:
+                reason = "obstacle_stop"
         else:
             output.linear.x = max(-float(self.get_parameter("max_linear_x").value), min(float(self.get_parameter("max_linear_x").value), source.linear.x))
             output.linear.y = max(-float(self.get_parameter("max_linear_y").value), min(float(self.get_parameter("max_linear_y").value), source.linear.y))
@@ -127,3 +162,4 @@ def main(args=None) -> None:
 
 if __name__ == "__main__":
     main()
+

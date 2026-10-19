@@ -42,6 +42,22 @@ GATE_SH = TOOLS / "r680_gate.sh"
 PLAN = REPO_ROOT / "R680_FIRST_MOTION_PLAN.md"
 
 
+def _function_literals(src, name):
+    """The non-docstring string literals inside a function, or None if absent.
+
+    Remote commands are assembled in string literals, so this is where a claim
+    like "the tool deletes the params" has to be verified. Comments are
+    deliberately out of reach: that is how the previous version of the check
+    above kept passing on a description of code that no longer existed.
+    """
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return [n.value for n in ast.walk(node)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    return None
+
+
 def _relay_start_lines():
     """Every line in the repo that launches the TX1 relay, with its filename."""
     hits = []
@@ -121,13 +137,46 @@ def test_gate_tool_verifies_against_the_publisher_list():
 
 
 def test_gate_tool_clears_stale_params_before_starting():
-    """Deleting the params is what makes the explicit flag authoritative."""
+    """Deleting the params is what makes the explicit flag authoritative.
+
+    Checked STRUCTURALLY, inside `clear_params()` -- not by searching the whole
+    file for a phrase. This test used to do the latter, and it kept passing
+    after the mechanism changed from six `rosparam delete` calls to a single
+    `rosgraph` script: the phrase survived in a COMMENT describing the old
+    version. A guard that passes on a comment is a guard that has stopped
+    guarding, and this project's own notes count at least four defects that a
+    substring check waved through. This was the fifth.
+    """
     src = GATE_PY.read_text()
-    assert "rosparam delete" in src, (
-        "the gate tool must delete the relay's private params before starting, "
-        "or a stale value survives and the explicit flag is not authoritative"
+    literals = _function_literals(src, "clear_params")
+    assert literals is not None, (
+        "r680_gate.py must keep a clear_params() step; the stale private params "
+        "are the whole reason the explicit flag could not be trusted"
     )
-    assert "enable_cmd_vel" in src
+    joined = "\n".join(literals)
+    assert "deleteParam" in joined or "rosparam delete" in joined, (
+        "clear_params() must actually delete the relay's private params on the "
+        "master. Its string literals are:\n%s" % joined
+    )
+    assert "enable_cmd_vel" in src or "deleteParam" in joined, (
+        "the params being deleted must include the gate flag"
+    )
+
+
+def test_gate_tool_starts_the_relay_with_an_explicit_flag():
+    """The one script that opens the gate must state the intent, never default.
+
+    `start_relay(client, False, None)` on the failure path must still pass
+    `_enable_cmd_vel:=false`; the tool builds that string itself, so the check
+    is that the flag is assembled from the argument rather than omitted.
+    """
+    literals = _function_literals(GATE_PY.read_text(), "start_relay")
+    assert literals is not None, "r680_gate.py must keep a start_relay() step"
+    joined = "\n".join(literals)
+    assert "_enable_cmd_vel:=" in joined, (
+        "start_relay must pass _enable_cmd_vel explicitly, either way; omitting "
+        "it inherits whatever the master kept from the previous process"
+    )
 
 
 def test_gate_tool_fails_closed():
