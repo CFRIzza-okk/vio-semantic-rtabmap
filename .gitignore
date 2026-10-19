@@ -38,3 +38,7 @@ venv/
 
 # Runtime logs directory
 /rtabmap_cuda_ws/logs/
+
+# 软著申报材料（二进制、体积大，不进仓库）
+/softcopyright/
+/softcopyright.zip
