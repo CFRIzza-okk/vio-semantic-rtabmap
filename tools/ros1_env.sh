@@ -135,6 +135,11 @@ if _probe; then
     echo "  ✓ master 可达"
 else
     echo "  ✗ ${ROBOT_IP}:${ROBOT_PORT} 连不上 —— TX1 上的 roscore 没起?" >&2
-    echo "    在 TX1 上启动: roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch" >&2
+    echo "    在 TX1 上**先起独立 master,再起驱动**:" >&2
+    echo "      nohup roscore > /home/wheeltec/roscore.log 2>&1 &" >&2
+    echo "      nohup roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch > /home/wheeltec/driver.log 2>&1 &" >&2
+    echo "    别让 roslaunch 自己去拉 master:那样 master 会成为它的子进程," >&2
+    echo "    它一退(或按 Ctrl-C)master 就跟着死,还活着的 rospy 节点不会" >&2
+    echo "    重新注册,于是静悄悄地失效。tools/r680_*_up.sh 的 1b 步就是这么做的。" >&2
     return 1 2>/dev/null || exit 1
 fi

@@ -119,6 +119,39 @@ def inspect(path):
     return info
 
 
+def live_rtabmap_dbs():
+    """返回"正被活着的 rtabmap 打开"的库路径集合。
+
+    为什么需要它(2026-10-17 实测,代价是车上一个 rtabmap 进程):
+    本工具会对每个库跑完整性检查,也就是长时间持有读锁。而 rtabmap 每个节点都要
+    写库,SQLite 回滚日志模式下写操作需要 EXCLUSIVE 锁 —— 读锁不放手,它的写就
+    拿到 SQLITE_BUSY,RTAB-Map 把 `addStatisticsQuery()` 的这个错误当致命错误,
+    直接 abort(exit code -6)。日志原话:
+
+        [FATAL] DBDriverSqlite3.cpp:5034::addStatisticsQuery()
+                Condition (rc == SQLITE_DONE) not met! [DB error: database is locked]
+        terminate called after throwing an instance of 'UException'
+
+    地图数据本身没事(出事前的事务都已提交,逐项对比 164 节点 / 194 链接 / 164 份
+    深度数据全在),但"我只是看一眼库"不该把车上的建图进程看死。
+    """
+    open_dbs = set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % entry, "rb") as fh:
+                cmd = fh.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        if "rtabmap" not in cmd:
+            continue
+        for tok in cmd.split("\0"):
+            if tok.endswith(".db") or ".db?" in tok:
+                open_dbs.add(os.path.realpath(os.path.expanduser(tok)))
+    return open_dbs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="盘点本机所有 RTAB-Map 数据库。",
@@ -150,6 +183,20 @@ def main() -> int:
     if not found:
         print("没有找到任何 .db 文件。")
         return 0
+
+    live = [p for p in sorted(found) if p in live_rtabmap_dbs()]
+    if live:
+        print("!! 有 rtabmap 正在运行,而且正打开着下面这些库:")
+        for p in live:
+            print("     %s" % p)
+        print("   现在读它会给它加读锁,而它每插一个节点都要写库(SQLite 回滚日志模式下")
+        print("   写需要 EXCLUSIVE 锁)。读锁没放,它的写就会拿到 SQLITE_BUSY,而")
+        print("   RTAB-Map 把这个当成致命错误直接 abort —— 实测就是这样:")
+        print("     [FATAL] DBDriverSqlite3.cpp addStatisticsQuery() database is locked")
+        print("     terminate called after throwing an instance of 'UException'")
+        print("     process has died [exit code -6]")
+        print("   地图数据不会坏(崩溃前已提交),但车上的建图进程会当场没掉。")
+        print("   请先停栈(bash tools/r680_down.sh),或改为扫描一份快照。\n")
 
     rows = [inspect(p) for p in sorted(found)]
     useful = [r for r in rows if r.get("nodes", 0) > 0]

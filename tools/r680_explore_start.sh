@@ -18,6 +18,16 @@
 # 不要加 `set -u`。
 
 WS=/home/jetson/VIO/semantic_ws
+# 必须在 `cd` **之前**算出本脚本所在的绝对目录:cd 之后 $(dirname "$0") 这个
+# 相对路径会被解释成新工作目录下的路径,于是 source 静默失败(本脚本没有 set -e),
+# 依赖的函数变成空,预算变成空字符串 —— 而 `case "$APPLIED" in *"$EMPTY"*)`
+# 是**任何字符串都匹配**,校验会把自己一起绕过。实测就是这么漏的。
+TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
+[ -f "$TOOLS_DIR/r680_budget.sh" ] || {
+    echo "缺少 $TOOLS_DIR/r680_budget.sh —— 预算无法规范化,拒绝启动"; exit 1; }
+source "$TOOLS_DIR/r680_budget.sh"
+command -v r680_float_arg >/dev/null || {
+    echo "$TOOLS_DIR/r680_budget.sh 里没有 r680_float_arg,拒绝启动"; exit 1; }
 cd "$WS" || exit 1
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
 source install/setup.bash >/dev/null 2>&1
@@ -27,7 +37,15 @@ export ROS_DOMAIN_ID=99
 # 300 s 的一键用法见 tools/r680_explore_300.sh —— 它 export 这个变量再调本脚本。
 # 注意:launch 文件并不声明 max_exploration_time,所以预算**只能**这样设,
 # 在 r680_explore_up.sh 里改那个同名变量是没有用的(它只用于打印横幅)。
-EXPLORE_TIME="${EXPLORE_TIME:-120.0}"
+source "$TOOLS_DIR/r680_budget.sh"
+# 见 tools/r680_budget.sh:整数字面量会被 DOUBLE 参数拒掉,失败只有一行警告,
+# 预算就静默停在节点默认值上。这里先规范成浮点形态,设完再回读校验。
+EXPLORE_TIME="$(r680_float_arg "${EXPLORE_TIME:-120.0}")"
+# 空值/垃圾值必须在这里就死掉:空值传下去会让下面的回读校验变成永远通过。
+case "$EXPLORE_TIME" in
+    ''|*[!0-9.eE+-]*)
+        echo "预算值非法: '${EXPLORE_TIME}' (要秒数,例如 300 或 300.0)"; exit 1 ;;
+esac
 
 MODE=""
 ASSUME_YES=0
@@ -42,56 +60,15 @@ for arg in "$@"; do
 done
 [ -n "$MODE" ] || { echo "用法: $0 --dry-run | --go [--yes]"; exit 2; }
 
-echo "=== 起探索前的前置检查 ==="
-LV=$(timeout 10 ros2 topic echo --once /safety/localization_valid 2>&1 | grep -o 'true\|false' | head -1)
-OS=$(timeout 10 ros2 topic echo --once /safety/obstacle_stop 2>&1 | grep -o 'true\|false' | head -1)
-BV=$(timeout 10 ros2 topic echo --once /battery_voltage 2>&1 | grep data | head -1)
-echo "  localization_valid: $LV  (需 true)"
-echo "  obstacle_stop:      $OS  (需 false)"
-echo "  battery_voltage:    $BV"
-
-if [ "$MODE" = "go" ]; then
-    if [ "$LV" != "true" ] || [ "$OS" != "false" ]; then
-        echo "  ❌ 前置条件不满足,拒绝开始运动"
-        exit 1
-    fi
-    echo
-    echo "  ⚠️  即将开始**真实自主运动**"
-    echo "      限速 0.10 / 0.0 / 0.35,预算 ${EXPLORE_TIME} s"
-    echo "      只有满足以下全部条件才继续:"
-    echo "        - 现场有人,手能碰到物理断电开关"
-    echo "        - 前方至少 2 m 净空"
-    echo "        - 另一个终端已经开着: bash tools/r680_explore_watch.sh"
-    echo "      急停随时可用: bash tools/r680_estop.sh"
-    echo
-    if [ "$ASSUME_YES" = "1" ]; then
-        echo "  --yes 已给出,跳过人工确认(5 s 后开始,可 Ctrl-C 中止)"
-        sleep 5
-    else
-        read -r -p "  确认继续?输入 GO 开始: " ans
-        if [ "$ans" != "GO" ]; then echo "  已取消(车未动)"; exit 0; fi
-    fi
-fi
-
-echo
-echo "=== 设置探索参数 ==="
-if [ "$MODE" = "go" ]; then
-    timeout 15 ros2 param set /r680_explorer dry_run false 2>&1 | tail -1
-else
-    timeout 15 ros2 param set /r680_explorer dry_run true 2>&1 | tail -1
-fi
-timeout 15 ros2 param set /r680_explorer max_exploration_time "$EXPLORE_TIME" 2>&1 | tail -1
-timeout 15 ros2 param set /r680_explorer goal_timeout 60.0 2>&1 | tail -1
-timeout 15 ros2 param set /r680_explorer min_battery 10.5 2>&1 | tail -1
-timeout 15 ros2 param set /r680_explorer battery_timeout 5.0 2>&1 | tail -1
-echo "  生效值:"
-for p in dry_run max_exploration_time goal_timeout min_battery battery_timeout; do
-    printf '    %-22s ' "$p"; timeout 8 ros2 param get /r680_explorer "$p" 2>&1 | tail -1
-done
-
-echo
-echo "=== 启动探索 ==="
-timeout 20 ros2 service call /exploration/start std_srvs/srv/Trigger 2>&1 | tail -3
-echo
-echo "  现在开始监视: bash tools/r680_explore_watch.sh"
-echo "  急停:         bash tools/r680_estop.sh"
+# 从这里往下全部交给 tools/r680_start_explore.py:检查 → 确认 → 设参数 → 启动
+# 合成**一个进程**。原来这一段要发起 12 次 `ros2` 命令行(5 次 param set、
+# 5 次 param get、1 次预算回读、1 次 service call),每次冷启动实测 1.0~1.2 s,
+# 叠起来十几秒 —— 操作员敲了 GO,车却纹丝不动。等待会让人以为脚本坏了,
+# 转去手敲 ros2 param set 绕过它,而绕过的正是带校验的那条路。
+#
+# 校验没有减少,只是挪到了一个进程里:定位/障碍前置检查、参数回读比对预算、
+# dry_run 实际生效与否、/exploration/start 的成功与否,一条不少。
+ARGS=(--budget "$EXPLORE_TIME")
+if [ "$MODE" = "go" ]; then ARGS+=(--go); else ARGS+=(--dry-run); fi
+if [ "$ASSUME_YES" = "1" ]; then ARGS+=(--yes); fi
+exec python3 "$TOOLS_DIR/r680_start_explore.py" "${ARGS[@]}"

@@ -57,6 +57,82 @@ need() { # need <描述> <实际> <期望>
     else printf '  ❌ %-38s %s (期望 %s)\n' "$1" "$2" "$3"; fail=1; fi
 }
 
+# ---------------------------------------------------------------- 就绪轮询
+# 2026-10-16:原来整脚本用固定 sleep 盲等(合计 184 s,占整场 271.7 s 的 68%),
+# 而实测各环节通常几秒就绪 —— 例如底盘驱动 5 s 内出自 /odom,却固定睡 30 s。
+#
+# 这里改成"条件成立就立刻继续,超时才放弃"。语义与原版一致:超时**不**中止,
+# 仍然交给脚本后面原有的检查去判定成败(所以不会把"慢"误判成"坏")。
+#
+# 超时上限一律取原 sleep 的值或更大,因此最坏情况不会比原来更慢。
+wait_for() { # wait_for <描述> <超时秒> <探测命令...>
+    local desc="$1" limit="$2"; shift 2
+    local t0=$SECONDS
+    while :; do
+        if "$@" >/dev/null 2>&1; then
+            printf '  ✅ %-38s %s s\n' "$desc" "$((SECONDS - t0))"
+            return 0
+        fi
+        if [ $((SECONDS - t0)) -ge "$limit" ]; then
+            printf '  ⏱️  %-38s 超时 %s s(继续,由后续检查判定)\n' "$desc" "$limit"
+            return 1
+        fi
+        sleep 0.5
+    done
+}
+
+TX1_PROLOGUE='source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.2.102:11311
+export ROS_IP=192.168.2.102'
+
+tx1_odom_ready() { # /odom 真的出帧了才算驱动就绪
+    timeout 25 python3 /home/jetson/tx1.py "$TX1_PROLOGUE
+timeout 4 rostopic echo -n1 /odom 2>/dev/null | grep -q frame_id" >/dev/null 2>&1
+}
+
+tx1_node_ready() { # 中继等节点已注册
+    timeout 25 python3 /home/jetson/tx1.py "$TX1_PROLOGUE
+timeout 8 rosnode list 2>/dev/null | grep -qx '/r680_ros1_relay'" >/dev/null 2>&1
+}
+
+# Orin 侧需要清掉的进程名,清理与校验共用同一份,避免两处写岔。
+KILL_PATTERNS="ros2_relay_node exploration_node obstacle_monitor_node localization_monitor_node \
+depthimage_to_laserscan cmd_vel_safety_node rtabmap nav2 realsense lifecycle_manager \
+controller_server planner_server bt_navigator behavior_server waypoint_follower \
+costmap static_transform rviz"
+
+orin_clean() { # 进程表里再无匹配项(这才是"清理干净"的正确判据)
+    # shellcheck disable=SC2086
+    python3 /home/jetson/VIO/tools/safe_kill.py --dry-run $KILL_PATTERNS 2>/dev/null \
+        | grep -q "no matches"
+}
+
+orin_topic_live() { # 某话题已经有发布者
+    timeout 12 ros2 topic info "$1" 2>/dev/null | grep -qi "Publisher count: [1-9]"
+}
+
+orin_all_active() { # 5 个 Nav2 生命周期节点全部 active
+    local n
+    for n in controller_server planner_server bt_navigator behavior_server waypoint_follower; do
+        timeout 20 ros2 lifecycle get "/$n" 2>/dev/null | grep -q "active" || return 1
+    done
+    return 0
+}
+
+orin_bool_settled() { # 布尔话题连续两次读数一致 = 监视器已经稳定
+    # 安全监视器刚启动时会先发布一个保守的"停机"值,之后才依据真实的 /scan
+    # 判定。只读一次很可能正好读到那个瞬间值 —— 实测会误报 obstacle_stop=true,
+    # 从而给出假 NO-GO(提速前靠 sleep 45 掩盖了这个问题)。
+    # 这里等的是"稳定",**不预设它该是什么值**:真有障碍物时它会稳定在 true,
+    # 后面的 need 判定照样抓得住。
+    local a b
+    a=$(timeout 12 ros2 topic echo --once "$1" 2>/dev/null | grep -o "data: .*")
+    [ -z "$a" ] && return 1
+    sleep 1.5
+    b=$(timeout 12 ros2 topic echo --once "$1" 2>/dev/null | grep -o "data: .*")
+    [ -n "$b" ] && [ "$a" = "$b" ]
+}
+
 printf '模式: %s   限速: %.2f / %.2f / %.2f   预算: %.0fs / %.0fs\n' \
     "$MODE" "$MAX_LIN" "$MAX_LAT" "$MAX_ANG" "$MAX_EXPLORE_TIME" "$GOAL_TIMEOUT"
 
@@ -148,21 +224,81 @@ pkill -f "[r]oscore" 2>/dev/null
 sleep 3
 echo cleaned' 2>&1 | tail -1
 
+say "1b/7 TX1: 独立 roscore —— master 不能挂在 roslaunch 下"
+# roslaunch 发现没有 master 时会**自己拉起一个**,而那个 rosmaster 会成为
+# roslaunch 进程的**子进程**。于是两者同生共死:在那个 roslaunch 上按 Ctrl-C,
+# 或者上面清理步骤里的 `pkill -f "[w]heeltec_robot"`,都会顺手把 master 带走。
+#
+# 受害的不只是驱动。master 重启后 rospy 节点**不会重新注册**,所以中继和
+# tx1_power_log.py 会继续跑着,却从 `rosnode list` 里消失、什么也收不到 ——
+# 没有任何报错,它们只是安静地废掉了。只有进程表还能看出它们。
+#
+# 先把 roscore 单独起成 detached 进程,这个从属关系就断了:驱动的 roslaunch
+# 会挂到已有的 master 上,而不是自己再造一个,以后重启驱动不必再重启 master。
+#
+# 这一步**必须**与上面的清理分成两次 ssh 调用:清理里有 `pkill -f "[r]oscore"`,
+# 而这一行含明文 `roscore`,合在一起就是自匹配陷阱。
+#
+# 下面那段单引号参数里有两条规则,写在这里而不是写在里面 —— 里面看着像注释的
+# 东西其实不是注释:
+#   * 参数内部的 `#` **不构成注释**。对外层来说整段只是一个 bash 字符串,
+#     所以里面哪怕写在"注释"里的撇号也照样会终止字符串(phase_d 脚本就是这么
+#     被写坏的,而且报错出现在 20 行之后的那个引号上)。
+#   * 查 master 用 ps + grep,**不要用 pgrep**:pgrep 会拿它自己的命令行去匹配,
+#     而那个命令行就是这段参数本身、里面含有明文的进程名,于是它会匹配到
+#     执行它的那个 shell。
+#
+# 启动之后用**有界轮询**等端口 11311,而不是 `sleep 10`。实测 master 在 fork
+# 之后约 2 s 就在监听了,固定睡 10 s 等于每次启动白等 8 s;而机器慢的时候,
+# 同一个固定值又会变成"睡不够"。轮询上限 15 s(比原来的 10 s 更长,最坏情况
+# 不会更糟),下面的检查随后报出真实状态。
+#
+# 归属检查按**端口**挑 master,不用 `head -1`。2026-10-17 在两个 master 同时
+# 活着时实测:`head -1` 取的是 pid 最小=**最老**的那个,所以上一次会话残留的
+# master 会盖过本次栈真正在用的那个 —— 检查会把残留报成健康,而真正的地雷
+# 正是本次的 master。对它要解决的问题来说,这个方向刚好是反的。
+timeout 60 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.2.102:11311
+export ROS_IP=192.168.2.102
+cd /home/wheeltec
+nohup roscore > /home/wheeltec/roscore.log 2>&1 &
+for _i in $(seq 1 30); do
+    ss -ltn 2>/dev/null | grep -q 11311 && break
+    sleep 0.5
+done
+echo "--- 11311 监听 ---"
+ss -ltn 2>/dev/null | grep 11311 || echo "!! 11311 没有监听(master 没起来,下面的 roslaunch 会自己造一个 —— 地雷复活)"
+echo "--- master 的父进程必须是 roscore,不是 roslaunch ---"
+MPID=$(ps -eo pid,args | grep "[r]osmaster" | grep -- "-p 11311" | awk "{print \$1}" | head -1)
+if [ -z "$MPID" ]; then
+    echo "  !! 11311 上没有 rosmaster —— 驱动的 roslaunch 会自己造一个,那正是地雷"
+else
+    MPPID=$(ps -o ppid= -p "$MPID" 2>/dev/null | tr -d " ")
+    MPARENT=$(ps -o args= -p "$MPPID" 2>/dev/null)
+    echo "  master pid=$MPID  父进程 pid=$MPPID  ->  $MPARENT"
+    case "$MPARENT" in
+        *roscore*) echo "  OK: master 属于独立 roscore" ;;
+        *)         echo "  !! master 不属于 roscore —— 地雷还在" ;;
+    esac
+fi' 2>&1 | tail -8
+
 say "2/7 TX1: 底盘驱动"
-timeout 150 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
+# 启动与等待分开:启动只负责发命令,不要在同一个 ssh 调用里盲等 30 s。
+timeout 60 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
 source /home/wheeltec/wheeltec_robot/devel/setup.bash
 export ROS_MASTER_URI=http://192.168.2.102:11311
 export ROS_IP=192.168.2.102
 cd /home/wheeltec
 nohup roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch > /home/wheeltec/driver.log 2>&1 &
-sleep 30
-timeout 10 rosnode list 2>&1 | tr "\n" " " | head -c 300; echo' 2>&1 | tail -3
+sleep 1
+echo launched' 2>&1 | tail -1
+wait_for "TX1 驱动就绪(/odom 出帧)" 45 tx1_odom_ready
 
 say "3/7 TX1: 电压记录(充电/放电曲线,用于定 min_battery)"
 timeout 60 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
 export ROS_MASTER_URI=http://192.168.2.102:11311; export ROS_IP=192.168.2.102
 nohup python2 /home/wheeltec/tx1_power_log.py > /home/wheeltec/power_log.out 2>&1 &
-sleep 3; echo "  已启动(每 20 s 记一次到 /home/wheeltec/power_log.csv)"' 2>&1 | tail -1
+sleep 1; echo "  已启动(每 20 s 记一次到 /home/wheeltec/power_log.csv)"' 2>&1 | tail -1
 
 if [ "$USE_GATE" = "1" ]; then
     say "4/7 TX1: 打开运动闸门(经 r680_gate.sh,带校验)"
@@ -197,39 +333,58 @@ source install/setup.bash >/dev/null 2>&1
 export ROS_DOMAIN_ID=99
 
 say "5/7 Orin: 清理上一次整栈(必须先做,否则会叠加成两套)"
-python3 /home/jetson/VIO/tools/safe_kill.py --signal TERM \
-    ros2_relay_node exploration_node obstacle_monitor_node localization_monitor_node \
-    depthimage_to_laserscan cmd_vel_safety_node rtabmap nav2 realsense lifecycle_manager \
-    controller_server planner_server bt_navigator behavior_server waypoint_follower \
-    costmap static_transform rviz 2>&1 | tail -2
-sleep 8
-python3 /home/jetson/VIO/tools/safe_kill.py --signal KILL \
-    ros2_relay_node exploration_node obstacle_monitor_node localization_monitor_node \
-    depthimage_to_laserscan cmd_vel_safety_node rtabmap nav2 realsense lifecycle_manager \
-    controller_server planner_server bt_navigator behavior_server waypoint_follower \
-    costmap static_transform rviz 2>&1 | tail -2
-sleep 6
-printf '  清理后残留节点数(应为 0): '
-timeout 15 ros2 node list 2>/dev/null | wc -l
+# shellcheck disable=SC2086
+python3 /home/jetson/VIO/tools/safe_kill.py --signal TERM $KILL_PATTERNS 2>&1 | tail -1
+wait_for "Orin 节点优雅退出(TERM)" 20 orin_clean
+# shellcheck disable=SC2086
+python3 /home/jetson/VIO/tools/safe_kill.py --signal KILL $KILL_PATTERNS 2>&1 | tail -1
+wait_for "Orin 残留进程清零(KILL)" 12 orin_clean
+
+# 这里**不能**用 `ros2 node list | wc -l` 判定清理是否干净 —— 它测的是 DDS
+# 发现图而不是进程表,两种情况下都会非零:
+#   * 刚被杀死、发现租约未到期的节点仍会被列出(实测 KILL 之后仍显示 15 个)
+#   * 行为树内部节点、costmap 组件节点、tf2 监听器节点**根本不是进程**,
+#     却一直在列表里(实测健康栈 23 个节点中有 8 个属于这一类)
+# 所以"应为 0"这个断言永远不可能通过,只会制造假警报,掩盖真正的残留。
+# 正确判据是进程表 —— 也就是上面 safe_kill.py --dry-run 的 no matches。
+printf '  清理后残留进程(应为 no matches): '
+# shellcheck disable=SC2086
+python3 /home/jetson/VIO/tools/safe_kill.py --dry-run $KILL_PATTERNS 2>&1 | tail -1
 
 say "5b/7 Orin: relay + 相机 + 静态TF/安全闸门"
-nohup ros2 launch semantic_rtabmap r680_relay.launch.py > "$TMP/relay.log" 2>&1 &
-sleep 10
-nohup ros2 launch semantic_rtabmap r680_depth_cloud.launch.py start_inspector:=false > "$TMP/cam.log" 2>&1 &
-sleep 24
-nohup ros2 launch semantic_rtabmap r680_navigation.launch.py \
+setsid nohup ros2 launch semantic_rtabmap r680_relay.launch.py > "$TMP/relay.log" 2>&1 &
+wait_for "relay 就绪(/odom 有发布者)" 25 orin_topic_live /odom
+setsid nohup ros2 launch semantic_rtabmap r680_depth_cloud.launch.py start_inspector:=false > "$TMP/cam.log" 2>&1 &
+# 等相机**自己**的话题。不要等 /scan —— 那不是相机 launch 产的(它来自更晚
+# 启动的 depthimage_to_laserscan),在这里等它必然等到超时。
+wait_for "相机就绪(color/camera_info 有发布者)" 45 orin_topic_live /camera/camera/color/camera_info
+setsid nohup ros2 launch semantic_rtabmap r680_navigation.launch.py \
     publish_base_tf:=false \
     max_linear_x:=$MAX_LIN max_linear_y:=$MAX_LAT max_angular_z:=$MAX_ANG \
     > "$TMP/nav.log" 2>&1 &
-sleep 12
-for p in max_linear_x max_linear_y max_angular_z command_timeout require_localization stop_on_obstacle; do
-    printf '  cmd_vel_safety %-20s ' "$p"
-    timeout 8 ros2 param get /cmd_vel_safety "$p" 2>&1 | tail -1
+wait_for "安全闸门就绪(/cmd_vel_safe 有发布者)" 40 orin_topic_live /cmd_vel_safe
+
+# 6 个参数并行查:串行每个要 1.3~4.3 s,并行后约等于最慢的那一次。
+# 注意 wait 必须指名 PID —— 不带参数的 wait 会等上面那些永不退出的 ros2 launch。
+SAFETY_PARAMS="max_linear_x max_linear_y max_angular_z command_timeout require_localization stop_on_obstacle obstacle_escape_rotation obstacle_escape_angular_z"
+_pdir=$(mktemp -d); _pids=""
+_i=0
+for p in $SAFETY_PARAMS; do
+    _i=$((_i + 1))
+    ( timeout 20 ros2 param get /cmd_vel_safety "$p" 2>&1 | tail -1 > "$_pdir/$_i" ) &
+    _pids="$_pids $!"
 done
+for _pid in $_pids; do wait "$_pid"; done
+_i=0
+for p in $SAFETY_PARAMS; do
+    _i=$((_i + 1))
+    printf '  cmd_vel_safety %-20s %s\n' "$p" "$(cat "$_pdir/$_i" 2>/dev/null)"
+done
+rm -rf "$_pdir"
 
 say "6/7 Orin: RTAB-Map(建图与定位)"
 rm -f "$HOME/.ros/rtabmap_explore.db"
-nohup ros2 launch rtabmap_launch rtabmap.launch.py \
+setsid nohup ros2 launch rtabmap_launch rtabmap.launch.py \
     visual_odometry:=false icp_odometry:=false \
     odom_topic:=/odom frame_id:=base_footprint \
     odom_frame_id:=odom_combined \
@@ -240,11 +395,11 @@ nohup ros2 launch rtabmap_launch rtabmap.launch.py \
     rtabmap_viz:=false rviz:=false publish_tf_map:=true \
     "args:=--Rtabmap/DetectionRate 2.0 --Grid/CellSize 0.05 --Mem/NotLinkedNodesKept false" \
     "database_path:=$HOME/.ros/rtabmap_explore.db" > "$TMP/rtab.log" 2>&1 &
-sleep 40
+wait_for "RTAB-Map 就绪(/rtabmap/map 有发布者)" 55 orin_topic_live /rtabmap/map
 printf '  RTAB-Map 角方差告警(应为 0): '
 grep -ci "large angular variance" "$TMP/rtab.log"
 printf '  里程计话题的发布者(应为 1,即 relay;>1 说明 rtabmap 的视觉里程计误开): '
-timeout 10 ros2 topic info /odom 2>&1 | grep -i "publisher count" | tail -1
+timeout 20 ros2 topic info /odom 2>&1 | grep -i "publisher count" | tail -1
 
 say "7/7 Orin: /scan + 安全监视器 + Nav2"
 if [ "$MODE" = "rehearsal" ]; then
@@ -252,35 +407,62 @@ if [ "$MODE" = "rehearsal" ]; then
 else
     DRY=true; AUTO=false; echo "  (默认:dry_run=true autostart=false —— 完全不选点)"
 fi
-nohup ros2 launch semantic_rtabmap r680_exploration.launch.py \
+setsid nohup ros2 launch semantic_rtabmap r680_exploration.launch.py \
     include_nav2:=true include_safety:=false \
     dry_run:=$DRY autostart:=$AUTO \
     max_linear_x:=$MAX_LIN max_linear_y:=$MAX_LAT max_angular_z:=$MAX_ANG \
     > "$TMP/explore.log" 2>&1 &
-sleep 45
+wait_for "Nav2 生命周期全部 active" 60 orin_all_active
+# 等安全监视器的输出稳定下来再判定 —— 否则会读到启动瞬间的保守值。
+wait_for "安全监视器数值稳定" 25 orin_bool_settled /safety/obstacle_stop
 
 say "Nav2 生命周期(必须全部 active)"
-for n in controller_server planner_server bt_navigator behavior_server waypoint_follower; do
-    printf '  %-20s ' "$n"
-    timeout 10 ros2 lifecycle get "/$n" 2>&1 | tail -1
+# 5 个节点并行查(串行实测 21.5 s,每个 lifecycle get 约 4.3 s)。
+NAV2_NODES="controller_server planner_server bt_navigator behavior_server waypoint_follower"
+_ldir=$(mktemp -d); _pids=""; _i=0
+for n in $NAV2_NODES; do
+    _i=$((_i + 1))
+    ( timeout 12 ros2 lifecycle get "/$n" 2>&1 | tail -1 > "$_ldir/$_i" ) &
+    _pids="$_pids $!"
 done
+for _pid in $_pids; do wait "$_pid"; done
+_i=0
+for n in $NAV2_NODES; do
+    _i=$((_i + 1))
+    printf '  %-20s %s\n' "$n" "$(cat "$_ldir/$_i" 2>/dev/null)"
+done
+rm -rf "$_ldir"
 
 say "前置条件检查"
+# 9 个 topic info + 5 个探测一次性并行(串行实测 26.7 s,并行后约等于最慢的一个)。
+PREREQ_TOPICS="/scan /map /rtabmap/map /cmd_vel_nav /cmd_vel_safe /safety/localization_valid /safety/obstacle_stop /exploration/goal /battery_voltage"
+_qdir=$(mktemp -d); _pids=""; _i=0
+for t in $PREREQ_TOPICS; do
+    _i=$((_i + 1))
+    ( timeout 20 ros2 topic info "$t" 2>&1 | tr '\n' ' ' | sed 's/Type: //' | head -c 76 > "$_qdir/$_i" ) &
+    _pids="$_pids $!"
+done
+( timeout 20 ros2 topic echo --once /safety/localization_valid 2>&1 | grep data | head -1 > "$_qdir/lv" ) & _pids="$_pids $!"
+( timeout 20 ros2 topic echo --once /safety/obstacle_stop        2>&1 | grep data | head -1 > "$_qdir/os" ) & _pids="$_pids $!"
+( timeout 20 ros2 topic echo --once /battery_voltage             2>&1 | grep data | head -1 > "$_qdir/bv" ) & _pids="$_pids $!"
+( timeout 20 ros2 param get /r680_explorer min_battery 2>&1 | tail -1 > "$_qdir/mb" ) & _pids="$_pids $!"
+( timeout 20 ros2 param get /r680_explorer dry_run     2>&1 | tail -1 > "$_qdir/dr" ) & _pids="$_pids $!"
+for _pid in $_pids; do wait "$_pid"; done
+
 echo "  话题:"
-for t in /scan /map /rtabmap/map /cmd_vel_nav /cmd_vel_safe \
-         /safety/localization_valid /safety/obstacle_stop /exploration/goal /battery_voltage; do
-    printf '    %-30s ' "$t"
-    timeout 8 ros2 topic info "$t" 2>&1 | tr '\n' ' ' | sed 's/Type: //' | head -c 76; echo
+_i=0
+for t in $PREREQ_TOPICS; do
+    _i=$((_i + 1))
+    printf '    %-30s %s\n' "$t" "$(cat "$_qdir/$_i" 2>/dev/null)"
 done
 echo
-printf '  localization_valid '; LV=$(timeout 10 ros2 topic echo --once /safety/localization_valid 2>&1 | grep data | head -1)
-echo "$LV"
-printf '  obstacle_stop      '; OS=$(timeout 10 ros2 topic echo --once /safety/obstacle_stop 2>&1 | grep data | head -1)
-echo "$OS"
-printf '  battery_voltage    '; BV=$(timeout 10 ros2 topic echo --once /battery_voltage 2>&1 | grep data | head -1)
-echo "$BV"
-printf '  min_battery(阈值)  '; timeout 8 ros2 param get /r680_explorer min_battery 2>&1 | tail -1
-printf '  dry_run            '; timeout 8 ros2 param get /r680_explorer dry_run 2>&1 | tail -1
+LV=$(cat "$_qdir/lv" 2>/dev/null); OS=$(cat "$_qdir/os" 2>/dev/null); BV=$(cat "$_qdir/bv" 2>/dev/null)
+printf '  localization_valid %s\n' "$LV"
+printf '  obstacle_stop      %s\n' "$OS"
+printf '  battery_voltage    %s\n' "$BV"
+printf '  min_battery(阈值)  %s\n' "$(cat "$_qdir/mb" 2>/dev/null)"
+printf '  dry_run            %s\n' "$(cat "$_qdir/dr" 2>/dev/null)"
+rm -rf "$_qdir"
 
 echo
 echo "  判定:"

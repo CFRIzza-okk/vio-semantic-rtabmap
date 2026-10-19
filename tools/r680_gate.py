@@ -38,6 +38,7 @@ or directly:
 import argparse
 import os
 import sys
+import time
 
 import paramiko
 
@@ -86,19 +87,43 @@ def connect():
 
 
 def clear_params(client):
-    """Delete the relay's private params so a stale value cannot be inherited."""
-    lines = [PROLOGUE]
-    for name in PRIVATE_PARAMS:
-        lines.append("rosparam delete %s/%s 2>/dev/null || true" % (NODE_NS, name))
-    lines.append("echo cleared")
-    return run(client, "".join(lines))
+    """Delete the relay's private params so a stale value cannot be inherited.
+
+    ONE remote process for all of them. Six separate `rosparam delete` calls
+    meant six python2 interpreter startups plus six master round-trips --
+    measured at 1852 ms. A single rospy/mrosgraph script does all six over
+    loopback in a few hundred ms. The effect on the master is identical.
+    """
+    cmd = (PROLOGUE
+           + "python2 - <<'PYEOF'\n"
+           + "import rosgraph\n"
+           + "master = rosgraph.Master('/r680_gate')\n"
+           + "for name in %r:\n" % (list(PRIVATE_PARAMS),)
+           + "    try:\n"
+           + "        master.deleteParam('%s/' + name)\n" % NODE_NS
+           + "    except Exception:\n"
+           + "        pass\n"
+           + "print('cleared')\n"
+           + "PYEOF\n")
+    return run(client, cmd)
 
 
 def stop_relay(client):
     # NOTE: the kill and the start must be SEPARATE ssh calls. A single command
     # line containing both the pkill pattern and the relay's path has the pattern
     # matching its own shell, which then dies before the launch line runs.
-    return run(client, 'pkill -f "[r]os1_relay" 2>/dev/null; sleep 3; echo stopped')
+    #
+    # And poll for the process to actually be gone rather than `sleep 3`: the
+    # relay exits in well under a second, so the fixed sleep was pure waiting.
+    # The bracket trick is used in BOTH the pkill and the pgrep so neither
+    # matches this shell's own command line.
+    cmd = ("pkill -f \"[r]os1_relay\" 2>/dev/null\n"
+           "for _i in $(seq 1 24); do\n"
+           "    pgrep -f \"[r]os1_relay\" >/dev/null || break\n"
+           "    sleep 0.25\n"
+           "done\n"
+           "echo stopped\n")
+    return run(client, cmd)
 
 
 def start_relay(client, enabled, limits):
@@ -107,11 +132,51 @@ def start_relay(client, enabled, limits):
         args += ["_max_linear_x:=%s" % limits[0],
                  "_max_linear_y:=%s" % limits[1],
                  "_max_angular_z:=%s" % limits[2]]
+    # No `sleep 8` here. Waiting for the PROCESS is only a weak signal; what
+    # actually matters is that the master sees the /cmd_vel publisher, and that
+    # is what wait_gate() polls below. This loop just avoids racing the fork --
+    # but it has to be able to TELL whether the relay is up, and matching the
+    # command line cannot do that here: this command line must contain the
+    # relay's path in order to launch it, so `pgrep -f "[r]os1_relay"` matches
+    # the shell running the command. Measured on TX1 (2026-10-17):
+    #
+    #   $ pgrep -af "[r]os1_relay"          # same command, plain path above
+    #   29486 python2 /home/wheeltec/ros1_relay.py ..._enable_cmd_vel:=false
+    #   31232 bash -c ... /home/wheeltec/ros1_relay.py ... pgrep -af "[r]os1_relay"
+    #
+    # 31232 IS the querying shell, so the old loop broke on its first iteration
+    # and waited for nothing at all -- a no-op dressed as a safeguard. The
+    # bracket trick does not help; the second, plain occurrence is the launch
+    # line itself.
+    #
+    # Filter on the process NAME instead: `ps -o comm` is the one property a
+    # shell whose argument mentions the name cannot fake. (The awk process and
+    # the shell both carry the name in their command lines, and both are
+    # excluded by the comm test.)
     cmd = (PROLOGUE
            + "nohup python2 %s %s > %s 2>&1 &\n" % (RELAY, " ".join(args), LOG)
-           + "sleep 8\n"
-           + "ps -eo pid,args | grep '[r]os1_relay' | grep -v 'bash -c' | head -1\n")
+           + "for _i in $(seq 1 20); do\n"
+           + "    ps -eo comm,args | awk '$1 == \"python2\" && /ros1_relay/ {found=1} END {exit !found}' && break\n"
+           + "    sleep 0.2\n"
+           + "done\n"
+           + "ps -eo pid,comm,args | awk '$2 == \"python2\" && /ros1_relay/ {print $1, $3; exit}'\n")
     return run(client, cmd)
+
+
+def wait_gate(client, want_open, limit=15.0):
+    """Poll until /cmd_vel's publisher state actually matches the intent.
+
+    This replaces the old fixed `sleep 8` + immediate check: if the relay needed
+    slightly longer than 8 s the old code would report a spurious verification
+    failure and force the gate closed. Polling on the real condition is both
+    faster in the normal case and more correct in the slow one.
+    """
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        if bool(cmd_vel_publishers(client)) == want_open:
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def effective_param(client, name):
@@ -193,6 +258,8 @@ def main():
         print("  [3/4] starting the relay with an EXPLICIT flag")
         start_relay(client, want_open, args.limits if want_open else None)
         print("  [4/4] verifying")
+        if not wait_gate(client, want_open):
+            print("  !! /cmd_vel did not reach the expected state within the timeout")
         ok = report(client, want_open=want_open)
         if not ok:
             # Fail loudly and leave the robot unable to move rather than
@@ -201,6 +268,7 @@ def main():
             clear_params(client)
             stop_relay(client)
             start_relay(client, False, None)
+            wait_gate(client, False)
             report(client, want_open=False)
             return 1
         return 0

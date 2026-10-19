@@ -44,6 +44,64 @@ pkill -f "[r]oscore" 2>/dev/null
 sleep 3
 echo "cleaned"' 2>&1 | tail -2
 
+say "1b/6 TX1: 独立 roscore —— master 不能挂在 roslaunch 下"
+# roslaunch 发现没有 master 时会**自己拉起一个**,而那个 rosmaster 会成为
+# roslaunch 进程的**子进程**。于是两者同生共死:在那个 roslaunch 上按 Ctrl-C,
+# 或者上面清理步骤里的 `pkill -f "[w]heeltec_robot"`,都会顺手把 master 带走。
+#
+# 受害的不只是驱动。master 重启后 rospy 节点**不会重新注册**,所以中继和
+# tx1_power_log.py 会继续跑着,却从 `rosnode list` 里消失、什么也收不到 ——
+# 没有任何报错,它们只是安静地废掉了。只有进程表还能看出它们。
+#
+# 先把 roscore 单独起成 detached 进程,这个从属关系就断了:驱动的 roslaunch
+# 会挂到已有的 master 上,而不是自己再造一个,以后重启驱动不必再重启 master。
+#
+# 这一步**必须**与上面的清理分成两次 ssh 调用:清理里有 `pkill -f "[r]oscore"`,
+# 而这一行含明文 `roscore`,合在一起就是自匹配陷阱。
+#
+# 下面那段单引号参数里有两条规则,写在这里而不是写在里面 —— 里面看着像注释的
+# 东西其实不是注释:
+#   * 参数内部的 `#` **不构成注释**。对外层来说整段只是一个 bash 字符串,
+#     所以里面哪怕写在"注释"里的撇号也照样会终止字符串(phase_d 脚本就是这么
+#     被写坏的,而且报错出现在 20 行之后的那个引号上)。
+#   * 查 master 用 ps + grep,**不要用 pgrep**:pgrep 会拿它自己的命令行去匹配,
+#     而那个命令行就是这段参数本身、里面含有明文的进程名,于是它会匹配到
+#     执行它的那个 shell。
+#
+# 启动之后用**有界轮询**等端口 11311,而不是 `sleep 10`。实测 master 在 fork
+# 之后约 2 s 就在监听了,固定睡 10 s 等于每次启动白等 8 s;而机器慢的时候,
+# 同一个固定值又会变成"睡不够"。轮询上限 15 s(比原来的 10 s 更长,最坏情况
+# 不会更糟),下面的检查随后报出真实状态。
+#
+# 归属检查按**端口**挑 master,不用 `head -1`。2026-10-17 在两个 master 同时
+# 活着时实测:`head -1` 取的是 pid 最小=**最老**的那个,所以上一次会话残留的
+# master 会盖过本次栈真正在用的那个 —— 检查会把残留报成健康,而真正的地雷
+# 正是本次的 master。对它要解决的问题来说,这个方向刚好是反的。
+timeout 60 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.2.102:11311
+export ROS_IP=192.168.2.102
+cd /home/wheeltec
+nohup roscore > /home/wheeltec/roscore.log 2>&1 &
+for _i in $(seq 1 30); do
+    ss -ltn 2>/dev/null | grep -q 11311 && break
+    sleep 0.5
+done
+echo "--- 11311 监听 ---"
+ss -ltn 2>/dev/null | grep 11311 || echo "!! 11311 没有监听"
+echo "--- master 的父进程必须是 roscore,不是 roslaunch ---"
+MPID=$(ps -eo pid,args | grep "[r]osmaster" | grep -- "-p 11311" | awk "{print \$1}" | head -1)
+if [ -z "$MPID" ]; then
+    echo "  !! 11311 上没有 rosmaster —— 驱动的 roslaunch 会自己造一个,那正是地雷"
+else
+    MPPID=$(ps -o ppid= -p "$MPID" 2>/dev/null | tr -d " ")
+    MPARENT=$(ps -o args= -p "$MPPID" 2>/dev/null)
+    echo "  master pid=$MPID  父进程 pid=$MPPID  ->  $MPARENT"
+    case "$MPARENT" in
+        *roscore*) echo "  OK: master 属于独立 roscore" ;;
+        *)         echo "  !! master 不属于 roscore —— 地雷还在" ;;
+    esac
+fi' 2>&1 | tail -8
+
 say "1/6 TX1 驱动"
 timeout 120 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
 source /home/wheeltec/wheeltec_robot/devel/setup.bash
@@ -52,7 +110,9 @@ export ROS_IP=192.168.2.102
 cd /home/wheeltec
 nohup roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch > /home/wheeltec/driver.log 2>&1 &
 sleep 28
-timeout 10 rosnode list 2>&1 | head -10' 2>&1 | tail -12
+timeout 10 rosnode list 2>&1 | head -10
+echo "--- master 归属(应仍是那个独立 roscore,不是这个 roslaunch) ---"
+ps -eo pid,ppid,args | grep "[r]osmaster" | head -1' 2>&1 | tail -14
 
 say "2/6 TX1 relay —— 打开运动闸门 (enable_cmd_vel=true)"
 timeout 80 python3 /home/jetson/tx1.py "source /opt/ros/melodic/setup.bash

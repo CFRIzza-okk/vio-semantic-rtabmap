@@ -67,6 +67,76 @@ pkill -f "[r]oscore" 2>/dev/null
 sleep 3
 echo "cleaned"' 2>&1 | tail -2
 
+say "1b/6 TX1: standalone roscore -- the master must not belong to roslaunch"
+# roslaunch starts a rosmaster ITSELF when none is running, and that master
+# becomes a CHILD of the roslaunch process. The two then live and die together:
+# a Ctrl-C on that roslaunch, or the `pkill -f "[w]heeltec_robot"` in the cleanup
+# above, takes the master down with the driver.
+#
+# The damage is not limited to the driver. A rospy node does NOT re-register after
+# a master restart, so the relay and tx1_power_log.py keep running while vanishing
+# from `rosnode list` and receiving nothing. There is no error -- they just go
+# quiet, and only the process table still shows them.
+#
+# Starting roscore detached FIRST breaks that ownership: the driver's roslaunch
+# finds a master already running and attaches to it instead of creating one, so
+# restarting the driver no longer costs a master restart.
+#
+# Deliberately a SEPARATE ssh call: the cleanup above runs
+# `pkill -f "[r]oscore"` and this line contains the plain text `roscore` -- put
+# them together and that is the self-match trap described above.
+#
+# TWO QUOTING RULES HOLD INSIDE THE SINGLE-QUOTED ARGUMENT BELOW. Both have
+# already broken this file once, so they are written out here rather than in
+# there:
+#
+#   * `#` does NOT start a comment inside that argument -- the whole argument is
+#     a single bash string as far as this file is concerned, so an apostrophe in
+#     what looks like an in-line comment still TERMINATES the string. An
+#     explanation that read "# ... the shell's pid" ended the string mid-way,
+#     and bash only reported the problem 20 lines later, at the next plain quote.
+#     Explanations therefore belong out here.
+#   * inspect the master with ps + grep, never pgrep: pgrep matches against its
+#     OWN command line, which is this very argument and contains the plain name,
+#     so it would also match the shell running it and could return that pid.
+#
+# The launch is followed by a BOUNDED POLL on port 11311 rather than `sleep 10`.
+# Measured, the master is listening about 2 s after the fork, so the fixed sleep
+# spent the other 8 s of every bring-up doing nothing -- and on a slow machine
+# the same fixed sleep would have been too short instead. The poll gives up
+# after 15 s (longer than the sleep it replaced, so the worst case is no worse)
+# and the lines below then report the real state.
+#
+# The ownership check selects the master BY PORT, not by `head -1`. Measured
+# with two masters alive (2026-10-17), `head -1` returns the lowest pid = the
+# OLDEST master, so a leftover master from a previous session wins over the one
+# this stack actually uses -- the check would report the leftover as healthy
+# while the real master is the landmine. Exactly backwards for its purpose.
+timeout 60 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
+export ROS_MASTER_URI=http://192.168.2.102:11311
+export ROS_IP=192.168.2.102
+cd /home/wheeltec
+nohup roscore > /home/wheeltec/roscore.log 2>&1 &
+for _i in $(seq 1 30); do
+    ss -ltn 2>/dev/null | grep -q 11311 && break
+    sleep 0.5
+done
+echo "--- 11311 listening ---"
+ss -ltn 2>/dev/null | grep 11311 || echo "!! nothing listening on 11311"
+echo "--- the master parent MUST be roscore, not a roslaunch ---"
+MPID=$(ps -eo pid,args | grep "[r]osmaster" | grep -- "-p 11311" | awk "{print \$1}" | head -1)
+if [ -z "$MPID" ]; then
+    echo "  !! no rosmaster on port 11311 -- the roslaunch below will create its own master, which IS the landmine"
+else
+    MPPID=$(ps -o ppid= -p "$MPID" 2>/dev/null | tr -d " ")
+    MPARENT=$(ps -o args= -p "$MPPID" 2>/dev/null)
+    echo "  master pid=$MPID  parent pid=$MPPID  ->  $MPARENT"
+    case "$MPARENT" in
+        *roscore*) echo "  OK: the master is owned by roscore" ;;
+        *)         echo "  !! the master is NOT owned by roscore -- the landmine is back" ;;
+    esac
+fi' 2>&1 | tail -8
+
 say "1/6 TX1 driver"
 timeout 120 python3 /home/jetson/tx1.py 'source /opt/ros/melodic/setup.bash
 source /home/wheeltec/wheeltec_robot/devel/setup.bash
@@ -77,8 +147,10 @@ nohup roslaunch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch > /home/whe
 sleep 28
 echo "--- nodes ---"
 timeout 10 rosnode list 2>&1 | head -10
+echo "--- master owner (must still be the standalone roscore, not this roslaunch) ---"
+ps -eo pid,ppid,args | grep "[r]osmaster" | head -1
 echo "--- driver log tail ---"
-tail -3 /home/wheeltec/driver.log 2>/dev/null' 2>&1 | tail -14
+tail -3 /home/wheeltec/driver.log 2>/dev/null' 2>&1 | tail -16
 
 say "2/6 TX1 relay"
 # _enable_cmd_vel:=false is passed EXPLICITLY, not omitted.

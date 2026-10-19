@@ -62,15 +62,15 @@ echo "$V | $P"' 2>/dev/null | tail -1)
 import sys, json
 line = sys.stdin.read().strip()
 keys = ('dry_run', 'consecutive_failures', 'goals_completed',
-        'goals_failed', 'blacklisted', 'elapsed')
+        'goals_failed', 'blacklisted', 'unexplorable', 'elapsed')
 try:
     d = json.loads(line)
 except Exception:
     print('|'.join(['-'] * len(keys))); raise SystemExit
 print('|'.join(str(d.get(k, '-')) for k in keys))
 " 2>/dev/null)
-    IFS='|' read -r dry fail done_ failed bl el <<< "$vals"
-    [ -z "$dry" ] && { dry="-"; fail="-"; done_="-"; failed="-"; bl="-"; el="-"; }
+    IFS='|' read -r dry fail done_ failed bl unexp el <<< "$vals"
+    [ -z "$dry" ] && { dry="-"; fail="-"; done_="-"; failed="-"; bl="-"; unexp="-"; el="-"; }
 
     printf '\033[2J\033[H'
     echo "════════ R680 自主探索监视 ════════  $(date +%H:%M:%S)"
@@ -83,6 +83,11 @@ print('|'.join(str(d.get(k, '-')) for k in keys))
     fi
     printf '  已用时间:  %s s / 120 s 预算\n' "$el"
     printf '  目标:      完成 %s,失败 %s,黑名单 %s\n' "$done_" "$failed" "$bl"
+    printf '  无法探索:  %s 处' "$unexp"
+    if [ "$unexp" != "0" ] && [ "$unexp" != "-" ] && [ -n "$unexp" ]; then
+        printf '   (反复失败,本轮不再派车去;明细: ros2 topic echo /exploration/unexplorable --once)'
+    fi
+    echo
     printf '  连续失败:  %s' "$fail"
     if [ "$fail" != "0" ] && [ "$fail" != "-" ] && [ -n "$fail" ]; then
         printf '   ⚠️  一直在失败,但状态可能仍写着 EXPLORING'
@@ -94,7 +99,11 @@ print('|'.join(str(d.get(k, '-')) for k in keys))
     [ "$lv" = "false" ] && printf '   ⚠️  cmd_vel_safety 会拒绝转发'
     echo
     printf '  障碍停车:  %s' "$os_"
-    [ "$os_" = "true" ] && printf '   ⚠️  0.45 m 内有障碍'
+    if [ "$os_" = "true" ]; then
+        # 这里不再只报"有障碍":障碍锁存时安全节点只封平移、放开原地旋转,
+        # 所以车仍然在动是**预期**的,不是故障。
+        printf '   (0.45 m 内有障碍:只封前进/横移,允许原地旋转脱困)'
+    fi
     echo
     printf '  电池:      %s\n' "${bv#data: }"
     echo
