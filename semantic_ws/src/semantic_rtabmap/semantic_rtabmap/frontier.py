@@ -169,6 +169,7 @@ def detect_frontiers(
     goal_clearance: float = 0.0,
     require_reachable: bool = True,
     max_frontiers: int = 64,
+    stats: Optional[dict] = None,
 ) -> List[Frontier]:
     """Return the frontier clusters of a grid, largest first.
 
@@ -178,7 +179,27 @@ def detect_frontiers(
     of an occupied cell, so the robot is never sent into a wall.
     ``require_reachable`` keeps only frontiers reachable through the same
     free-space component that currently contains the robot.
+
+    ``stats``, when given, is cleared and filled with the per-stage counts
+    (``mask_cells``, ``clusters``, ``dropped_small``, ``dropped_unreachable``,
+    ``dropped_no_goal_cell``, ``kept``, ``robot_label``). The caller cannot
+    otherwise tell "the map has no frontier" from "every frontier was filtered
+    out", and an empty goal list looks identical in both cases -- which is
+    exactly the ambiguity that made the 2026-10-18 run unfalsifiable from its
+    logs (one goal driven, then COMPLETE, with no record of why).
     """
+    if stats is not None:
+        stats.clear()
+        stats.update(
+            mask_cells=0,
+            clusters=0,
+            dropped_small=0,
+            dropped_unreachable=0,
+            dropped_no_goal_cell=0,
+            kept=0,
+            robot_label=0,
+        )
+
     if not info.valid:
         return []
     grid = np.asarray(data)
@@ -186,6 +207,8 @@ def detect_frontiers(
         return []
 
     mask = frontier_mask(grid, occupied_threshold)
+    if stats is not None:
+        stats["mask_cells"] = int(mask.sum())
     if not mask.any():
         return []
 
@@ -237,18 +260,27 @@ def detect_frontiers(
                         "filter this cycle"
                     )
 
+    if stats is not None:
+        stats["robot_label"] = int(robot_label)
+
     labels, count = ndimage.label(mask, structure=np.ones((3, 3), dtype=int))
+    if stats is not None:
+        stats["clusters"] = int(count)
     candidates: List[Frontier] = []
     for label_id in range(1, count + 1):
         ys, xs = np.nonzero(labels == label_id)
         size = int(xs.size)
         if size < int(min_size):
+            if stats is not None:
+                stats["dropped_small"] += 1
             continue
 
         if require_reachable and component_labels is not None:
             if robot_label > 0:
                 keep = component_labels[ys, xs] == robot_label
                 if not keep.any():
+                    if stats is not None:
+                        stats["dropped_unreachable"] += 1
                     continue
                 ys, xs = ys[keep], xs[keep]
                 size = int(xs.size)
@@ -279,6 +311,8 @@ def detect_frontiers(
                     best_d = d
                     best = (x, y)
             if best is None:
+                if stats is not None:
+                    stats["dropped_no_goal_cell"] += 1
                 continue
             gx, gy = best
 
@@ -287,7 +321,10 @@ def detect_frontiers(
         candidates.append(Frontier(centroid=(wx, wy), size=size, cells=cells))
 
     candidates.sort(key=lambda f: f.size, reverse=True)
-    return candidates[: int(max_frontiers)]
+    kept = candidates[: int(max_frontiers)]
+    if stats is not None:
+        stats["kept"] = len(kept)
+    return kept
 
 
 def estimate_gain(
@@ -412,6 +449,54 @@ class GoalBlacklist:
         return len(self._entries)
 
 
+class UnexplorableRegions:
+    """Areas that repeated attempts proved unreachable, for the whole run.
+
+    Why this is a separate structure and not just a long ``GoalBlacklist`` TTL:
+    the two make different statements about the world, and the difference is
+    exactly what the operator needs to see.
+
+    * A blacklist entry says "not right now" -- Nav2 just failed there, the map
+      is still changing, so a retry later is reasonable. It expires.
+    * An entry here says "we tried this area repeatedly and it does not work",
+      e.g. the frontier sits behind furniture the rover cannot pass. Retrying it
+      is precisely what converts one failure into a run full of failures: with
+      the goal timeout at 60 s, three unreachable frontiers in a row are three
+      minutes of the budget spent re-proving the same thing, and they end the
+      run via the consecutive-failure abort.
+
+    So these entries never expire, and they are published (``as_list``) as the
+    operator-visible answer to "where can this robot not go?" -- which is also
+    what keeps the abort message honest: it can now distinguish "no reachable
+    frontier left" from "the places we could not reach have been excluded".
+    """
+
+    def __init__(self, radius: float = 1.5) -> None:
+        self.radius = float(radius)
+        self._entries: List[Tuple[float, float]] = []
+
+    def add(self, x: float, y: float) -> None:
+        x, y = float(x), float(y)
+        if not self.blocked(x, y):
+            self._entries.append((x, y))
+
+    def blocked(self, x: float, y: float) -> bool:
+        r2 = self.radius * self.radius
+        for ex, ey in self._entries:
+            if (ex - x) ** 2 + (ey - y) ** 2 <= r2:
+                return True
+        return False
+
+    def as_list(self) -> List[dict]:
+        return [{"x": x, "y": y} for x, y in self._entries]
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
 def select_goal(
     frontiers: Sequence[Frontier],
     blacklist: Optional[GoalBlacklist] = None,
@@ -419,23 +504,51 @@ def select_goal(
     min_distance: float = 0.0,
     max_distance: float = float("inf"),
     robot_xy: Optional[Tuple[float, float]] = None,
+    unexplorable: Optional[UnexplorableRegions] = None,
+    stats: Optional[dict] = None,
 ) -> Optional[Frontier]:
     """Return the highest scoring frontier that passes all filters.
 
     Only a frontier already scored by :func:`score_frontiers` (or one with a
     manually assigned ``score``) can be selected. ``None`` means the caller
     should treat exploration as finished for this cycle.
+
+    ``stats``, when given, accumulates one count per rejection reason
+    (``unscored``, ``out_of_range``, ``blacklisted``, ``unexplorable``) plus
+    ``selected`` (0/1). It is *not* cleared here: the caller passes the same
+    dict to :func:`detect_frontiers`, and the two halves answer different
+    questions -- "were there any frontiers" versus "why was none of them
+    pickable".
     """
+    if stats is not None:
+        for key in ("unscored", "out_of_range", "blacklisted", "unexplorable"):
+            stats.setdefault(key, 0)
+        stats["selected"] = 0
+
     best: Optional[Frontier] = None
     for frontier in frontiers:
         if frontier.score == float("-inf"):
+            if stats is not None:
+                stats["unscored"] += 1
             continue
         if not (min_distance <= frontier.distance <= max_distance):
+            if stats is not None:
+                stats["out_of_range"] += 1
             continue
         if blacklist is not None and blacklist.blocked(
             frontier.centroid[0], frontier.centroid[1], now
         ):
+            if stats is not None:
+                stats["blacklisted"] += 1
+            continue
+        if unexplorable is not None and unexplorable.blocked(
+            frontier.centroid[0], frontier.centroid[1]
+        ):
+            if stats is not None:
+                stats["unexplorable"] += 1
             continue
         if best is None or frontier.score > best.score:
             best = frontier
+    if stats is not None and best is not None:
+        stats["selected"] = 1
     return best

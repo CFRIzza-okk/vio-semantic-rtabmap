@@ -76,6 +76,12 @@ r680_explorer:
     replan_period: 3.0
     # 连续 N 次都没有可用 frontier 才判定探索完成，避免瞬时误判。
     complete_confirmations: 3
+    # 反复失败的区域会被永久排除，并发布在 /exploration/unexplorable 上。
+    # 与 blacklist 的区别：黑名单是"现在不行，等会再试"（会过期）；
+    # 这里是"试过了，去不了"，本轮不再重试，也不该让操作员以为还有希望。
+    # 阈值按区域计（半径 1.5 m），因为 frontier 质心每次差几厘米。
+    unexplorable_radius: 1.5
+    unexplorable_failures: 2
 
 # 障碍安全监视器：从 /scan 的前向扇区判断是否需要急停。
 # 没有 /scan 数据时按“障碍存在”处理，因为深度相机是唯一的避障传感器。

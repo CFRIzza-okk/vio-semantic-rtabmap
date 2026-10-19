@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from typing import Optional
+from typing import List, Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -50,6 +50,7 @@ from semantic_rtabmap.frontier import (
     Frontier,
     GoalBlacklist,
     GridInfo,
+    UnexplorableRegions,
     detect_frontiers,
     score_frontiers,
     select_goal,
@@ -117,6 +118,18 @@ class ExplorationNode(Node):
         self.declare_parameter("score_weight_heading", 0.6)
         self.declare_parameter("blacklist_radius", 1.0)
         self.declare_parameter("blacklist_ttl", 60.0)
+        # 反复失败后被永久排除的区域（"无法探索"）。
+        #
+        # 为什么不能只靠 blacklist_ttl：黑名单 60 s 就过期，于是同一个到不了的
+        # frontier 会被反复重试。按 goal_timeout 60 s 算，连续三次重试就是三分
+        # 钟预算花在重复证明同一件事，而且最后是以"连续失败"中止整轮探索 ——
+        # 真正的原因是**那一片地方去不了**，不是探索策略错了。
+        #
+        # unexplorable_failures 是按**区域**计的（半径 unexplorable_radius），
+        # 不是按坐标精确匹配：frontier 质心每次都会差几厘米，精确匹配等于永不
+        # 触发。
+        self.declare_parameter("unexplorable_radius", 1.5)
+        self.declare_parameter("unexplorable_failures", 2)
         self.declare_parameter("replan_period", 3.0)
         self.declare_parameter("complete_confirmations", 3)
 
@@ -137,6 +150,13 @@ class ExplorationNode(Node):
             radius=float(self.get_parameter("blacklist_radius").value),
             ttl=float(self.get_parameter("blacklist_ttl").value),
         )
+        self._unexplorable = UnexplorableRegions(
+            radius=float(self.get_parameter("unexplorable_radius").value)
+        )
+        # [[x, y, failures], ...] -- one row per area that has failed at least
+        # once. Kept separately from the unexplorable set so the transition is
+        # observable (and testable) instead of appearing as a single jump.
+        self._region_failures: List[List[float]] = []
         self._goal_handle = None
         self._goal_started = 0.0
         self._active_goal: Optional[Frontier] = None
@@ -149,6 +169,11 @@ class ExplorationNode(Node):
         # the DRY_RUN_DONE message so the number means something to the operator.
         self._dry_run_seen = 0
         self._last_plan = 0.0
+        # Counts from the most recent frontier check, published in the COMPLETE
+        # message and in every "no goal this check" line. Kept as an attribute
+        # because the COMPLETE decision is made in a later cycle than the check
+        # that produced them.
+        self._last_frontier_stats: dict = {}
         self._battery: Optional[float] = None
         self._battery_stamp = 0.0
 
@@ -170,6 +195,12 @@ class ExplorationNode(Node):
         self._state_pub = self.create_publisher(String, "/exploration/state", qos)
         self._status_pub = self.create_publisher(String, "/exploration/status", qos)
         self._goal_pub = self.create_publisher(PoseStamped, "/exploration/goal", qos)
+        # 被判定"无法探索"的区域，JSON 列表 [{"x":..,"y":..}, ...]。
+        # 单独发一个话题而不是只塞进 status：这是操作员要拿去用（在 RViz 里画、
+        # 或者人工判断该不该搬开障碍物）的东西，不该逼人去解析状态字符串。
+        self._unexplorable_pub = self.create_publisher(
+            String, "/exploration/unexplorable", qos
+        )
 
         self.create_service(Trigger, "/exploration/start", self._srv_start)
         self.create_service(Trigger, "/exploration/stop", self._srv_stop)
@@ -311,9 +342,13 @@ class ExplorationNode(Node):
             self.get_parameter("max_consecutive_failures").value
         ):
             self._cancel_goal()
+            # 把"无法探索"的区域数一并报出来：同一句"连续失败"可能是两种完全
+            # 不同的处境 —— 策略选不出好点，或者那片地方真的去不了。数字在这
+            # 里，操作员才能判断该改参数还是该搬开障碍物。
             self._set_state(
                 STATE_ABORTED,
-                "%d consecutive goal failures" % self._consecutive_failures,
+                "%d consecutive goal failures (%d area(s) marked unexplorable)"
+                % (self._consecutive_failures, len(self._unexplorable)),
             )
             return
 
@@ -391,6 +426,7 @@ class ExplorationNode(Node):
         if data is None:
             return
 
+        check_stats: dict = {}
         frontiers = detect_frontiers(
             data,
             info,
@@ -400,6 +436,7 @@ class ExplorationNode(Node):
             goal_clearance=float(self.get_parameter("goal_clearance").value),
             require_reachable=bool(self.get_parameter("require_reachable").value),
             max_frontiers=int(self.get_parameter("max_frontiers").value),
+            stats=check_stats,
         )
         score_frontiers(
             frontiers,
@@ -420,10 +457,30 @@ class ExplorationNode(Node):
             min_distance=float(self.get_parameter("min_goal_distance").value),
             max_distance=float(self.get_parameter("max_goal_distance").value),
             robot_xy=(rx, ry),
+            unexplorable=self._unexplorable,
+            stats=check_stats,
         )
+        self._last_frontier_stats = check_stats
         if goal is None:
+            # Say WHY every cycle, not only when the state changes. The state
+            # machine used to be the only narrator here (_set_state logs on
+            # transition only), so on 2026-10-18 the log showed one goal driven
+            # and then COMPLETE, with the two intermediate "empty cycle" rounds
+            # leaving no trace and no way to tell "the map has no frontier" from
+            # "every frontier was rejected" -- the two have completely different
+            # fixes.
+            self.get_logger().info("no goal this check: %s" % self._describe_stats())
             self._on_no_goal(frontiers)
             return
+
+        # INFO, not DEBUG: _tick reaches this line only when no goal is in
+        # flight, so it is one line per dispatched goal (~20-50 s apart), not one
+        # per cycle. At DEBUG the 2026-10-18 16:15 run left no trace of the four
+        # goals it dispatched -- two of them unplannable -- so the only evidence
+        # left was Nav2's side of the story.
+        self.get_logger().info(
+            "goal %s: %s" % (self._describe_goal(goal), self._describe_stats())
+        )
 
         self._empty_cycles = 0
         self._active_goal = goal
@@ -479,14 +536,53 @@ class ExplorationNode(Node):
             else:
                 self._set_state(
                     STATE_COMPLETE,
-                    "no reachable frontier after %d checks (%d goal(s) visited)"
-                    % (self._empty_cycles, self._completed_goals),
+                    "no reachable frontier after %d checks (%d goal(s) visited); "
+                    "last check: %s"
+                    % (self._empty_cycles, self._completed_goals, self._describe_stats()),
                 )
         else:
             self._set_state(
                 STATE_EXPLORING,
                 "no frontier this cycle (%d/%d)" % (self._empty_cycles, needed),
             )
+
+    def _describe_stats(self) -> str:
+        """One-line summary of the last frontier check, for the log and messages.
+
+        The two stages are printed as two groups because they answer different
+        questions: the first says whether the map had frontiers at all and which
+        filter removed them, the second says whether any surviving candidate was
+        pickable (distance window, blacklist, unexplorable regions).
+        """
+        s = self._last_frontier_stats or {}
+        get = lambda key: int(s.get(key, 0))  # noqa: E731 - tiny local helper
+        return (
+            "mask=%d clusters=%d small=%d unreachable=%d no_cell=%d kept=%d "
+            "robot_label=%d | out_of_range=%d blacklisted=%d unexplorable=%d "
+            "unscored=%d"
+            % (
+                get("mask_cells"),
+                get("clusters"),
+                get("dropped_small"),
+                get("dropped_unreachable"),
+                get("dropped_no_goal_cell"),
+                get("kept"),
+                get("robot_label"),
+                get("out_of_range"),
+                get("blacklisted"),
+                get("unexplorable"),
+                get("unscored"),
+            )
+        )
+
+    @staticmethod
+    def _describe_goal(goal) -> str:
+        return "x=%.2f y=%.2f size=%d score=%.2f" % (
+            goal.centroid[0],
+            goal.centroid[1],
+            goal.size,
+            goal.score,
+        )
 
     @staticmethod
     def _grid_array(grid: OccupancyGrid):
@@ -585,28 +681,74 @@ class ExplorationNode(Node):
                 STATE_EXPLORING, "goal reached (%d completed)" % self._completed_goals
             )
         else:
+            marked = False
             if goal is not None:
                 self._blacklist.add(
                     goal.centroid[0], goal.centroid[1], time.monotonic()
                 )
+                marked = self._record_failure(goal.centroid[0], goal.centroid[1])
             self._failed_goals += 1
             self._consecutive_failures += 1
             self._set_state(
                 STATE_EXPLORING,
-                "goal not reached (status=%d, %d consecutive failure(s))"
-                % (status, self._consecutive_failures),
+                "goal not reached (status=%d, %d consecutive failure(s))%s"
+                % (
+                    status,
+                    self._consecutive_failures,
+                    " -- area marked UNEXPLORABLE" if marked else "",
+                ),
             )
+
+    def _record_failure(self, x: float, y: float) -> bool:
+        """Count one failure for the area around ``(x, y)``.
+
+        Returns ``True`` exactly when this failure is the one that crossed the
+        threshold and marked the area unexplorable, so the caller can say so in
+        the operator-visible message instead of leaving the transition silent.
+
+        Matching is by radius, not by exact coordinates: a frontier centroid
+        moves by centimetres from cycle to cycle, so exact matching would never
+        accumulate and the area would never be given up on.
+        """
+        radius = self._unexplorable.radius
+        r2 = radius * radius
+        row = None
+        for candidate in self._region_failures:
+            if (candidate[0] - x) ** 2 + (candidate[1] - y) ** 2 <= r2:
+                row = candidate
+                break
+        if row is None:
+            row = [float(x), float(y), 0.0]
+            self._region_failures.append(row)
+        row[2] += 1
+
+        threshold = int(self.get_parameter("unexplorable_failures").value)
+        if row[2] >= threshold and not self._unexplorable.blocked(x, y):
+            self._unexplorable.add(x, y)
+            self.get_logger().warn(
+                "area (%.2f, %.2f) failed %d time(s) -- marked UNEXPLORABLE"
+                % (x, y, int(row[2]))
+            )
+            return True
+        return False
 
     def _reject_active_goal(self, reason: str) -> None:
         goal = self._active_goal
+        marked = False
         if goal is not None:
             self._blacklist.add(goal.centroid[0], goal.centroid[1], time.monotonic())
+            marked = self._record_failure(goal.centroid[0], goal.centroid[1])
         self._cancel_goal()
         self._failed_goals += 1
         self._consecutive_failures += 1
         self._set_state(
             STATE_EXPLORING,
-            "goal rejected: %s (%d consecutive)" % (reason, self._consecutive_failures),
+            "goal rejected: %s (%d consecutive)%s"
+            % (
+                reason,
+                self._consecutive_failures,
+                " -- area marked UNEXPLORABLE" if marked else "",
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -620,6 +762,7 @@ class ExplorationNode(Node):
             "goals_failed": self._failed_goals,
             "consecutive_failures": self._consecutive_failures,
             "blacklisted": len(self._blacklist),
+            "unexplorable": len(self._unexplorable),
             "elapsed": (
                 round(time.monotonic() - self._started_at, 1) if self._started_at else 0.0
             ),
@@ -631,6 +774,11 @@ class ExplorationNode(Node):
         }
         self._status_pub.publish(String(data=json.dumps(payload)))
         self._state_pub.publish(String(data=self._state))
+        # 每次都发，不是只在变化时发：操作员（或录制器）通常是在车已经跑起来
+        # 之后才连上来的，只在边沿发布会让它看到一个空话题。
+        self._unexplorable_pub.publish(
+            String(data=json.dumps(self._unexplorable.as_list()))
+        )
 
 
 def main(args=None) -> None:

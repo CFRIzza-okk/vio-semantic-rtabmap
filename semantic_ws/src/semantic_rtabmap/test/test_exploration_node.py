@@ -141,6 +141,37 @@ def test_complete_after_repeated_empty_cycles(node_factory):
     spin_for(node, 1.0)
     assert node._state == STATE_COMPLETE
     assert "no reachable frontier" in node._message
+    # The verdict must carry the counts that produced it. On 2026-10-18 the log
+    # showed one goal driven and then COMPLETE while the two intermediate empty
+    # rounds left no trace, so "the map had no frontier" and "every frontier was
+    # filtered out" could not be told apart -- and they need opposite fixes.
+    assert "last check:" in node._message
+    assert "mask=0" in node._message
+    assert "clusters=0" in node._message
+
+
+def test_frontier_check_stats_reach_the_node(node_factory):
+    """The counts must survive the trip from the policy into the node.
+
+    The COMPLETE message is assembled in a later cycle than the check that
+    produced the numbers, so the node has to keep them; a pure-function test
+    alone would not catch the dict being dropped on the floor.
+    """
+    node = node_factory(
+        autostart=True,
+        dry_run=True,
+        replan_period=0.05,
+        complete_confirmations=2,
+        min_frontier_size=10,
+    )
+    node._on_map(make_all_free_grid())
+    node._robot_pose = lambda: (2.0, 2.0, 0.0)
+    spin_for(node, 1.0)
+
+    assert node._last_frontier_stats, "the node must keep the last check's counts"
+    assert node._last_frontier_stats["mask_cells"] == 0
+    assert node._last_frontier_stats["kept"] == 0
+    assert "selected" in node._last_frontier_stats
 
 
 def test_dry_run_sweep_reports_dry_run_done_not_complete(node_factory):
@@ -325,3 +356,129 @@ def test_current_goal_result_is_still_processed(node_factory):
     node._on_goal_result(_FakeFuture(), node._goal_seq)
     assert node._completed_goals == completed_before + 1
     assert node._consecutive_failures == 0
+
+
+# ----------------------------------------------------------------------
+# 反复失败的区域 -> "无法探索"
+# ----------------------------------------------------------------------
+def test_repeated_failures_mark_the_area_unexplorable(node_factory):
+    from semantic_rtabmap.frontier import Frontier
+
+    node = node_factory(autostart=True, dry_run=True, replan_period=10.0,
+                        unexplorable_failures=2, unexplorable_radius=1.5)
+    goal = Frontier(centroid=(3.0, 3.0), size=10, distance=1.0, score=1.0)
+
+    node._active_goal = goal
+    node._reject_active_goal("timeout")
+    assert len(node._unexplorable) == 0, "一次失败不该就判死刑"
+
+    node._active_goal = Frontier(centroid=(3.05, 3.02), size=10, distance=1.0, score=1.0)
+    node._reject_active_goal("timeout")
+    assert len(node._unexplorable) == 1, "同一地区第二次失败必须被标注"
+    assert "UNEXPLORABLE" in node._message
+
+
+def test_failures_far_apart_are_counted_separately(node_factory):
+    from semantic_rtabmap.frontier import Frontier
+
+    node = node_factory(autostart=True, dry_run=True, replan_period=10.0,
+                        unexplorable_failures=2, unexplorable_radius=1.5)
+    for x in (1.0, 9.0):
+        for _ in range(2):
+            node._active_goal = Frontier(
+                centroid=(x, 1.0), size=10, distance=1.0, score=1.0
+            )
+            node._reject_active_goal("timeout")
+    # 两处各自累计到 2，所以两处都被标注 —— 而不是合并成一处。
+    assert len(node._unexplorable) == 2
+
+
+def test_goal_result_failure_also_marks_the_area(node_factory):
+    """走 Nav2 结果回调的那条失败路径也必须计数，不能只算超时路径。"""
+    from semantic_rtabmap.frontier import Frontier
+
+    node = node_factory(autostart=True, dry_run=True, replan_period=10.0,
+                        unexplorable_failures=1, unexplorable_radius=1.5)
+    node._active_goal = Frontier(centroid=(2.0, 2.0), size=10, distance=1.0, score=1.0)
+    node._goal_seq = 7
+
+    class FakeFuture:
+        def result(self):
+            class R:
+                status = 6  # ABORTED
+            return R()
+
+    node._on_goal_result(FakeFuture(), token=7)
+    assert len(node._unexplorable) == 1
+
+
+def test_unexplorable_area_is_not_selected_again(node_factory):
+    """端到端：选点 -> 失败两次 -> 再选点，不能再选中同一片地方。"""
+    node = node_factory(autostart=True, dry_run=False, replan_period=10.0,
+                        unexplorable_failures=2, unexplorable_radius=1.5,
+                        min_frontier_size=4, complete_confirmations=1)
+    node._on_map(make_grid())
+    node._robot_pose = lambda: (1.0, 1.5, 0.0)
+    node._client.wait_for_server = lambda timeout_sec=0.5: True
+    sent = []
+    node._send_goal = lambda goal: sent.append(goal)
+
+    node._plan_once(0.0, (1.0, 1.5, 0.0))
+    assert sent, "第一次应该选出目标"
+    first = sent[-1]
+    blocked = (first.centroid[0], first.centroid[1])
+
+    # 同一片地方失败两次 -> 标注
+    for _ in range(2):
+        node._active_goal = type(first)(
+            centroid=blocked, size=first.size, distance=first.distance, score=first.score
+        )
+        node._reject_active_goal("timeout")
+
+    sent.clear()
+    node._blacklist.clear()          # 排掉会过期的黑名单，只留"无法探索"在起作用
+    node._empty_cycles = 0
+    node._consecutive_failures = 0
+    node._plan_once(100.0, (1.0, 1.5, 0.0))
+    if sent:
+        chosen = (sent[-1].centroid[0], sent[-1].centroid[1])
+        assert not node._unexplorable.blocked(*chosen), (
+            "不能再把车派去已被标注无法探索的地方"
+        )
+    else:
+        # 只剩这一个候选时，正确地什么都不选，而不是回头重试。
+        assert node._unexplorable.blocked(*blocked)
+
+
+def test_unexplorable_topic_is_published(node_factory):
+    import json
+
+    from semantic_rtabmap.frontier import Frontier
+
+    node = node_factory(autostart=True, dry_run=True, replan_period=10.0,
+                        unexplorable_failures=1, unexplorable_radius=1.5)
+    seen = []
+    node.create_subscription(String, "/exploration/unexplorable", seen.append, 10)
+    node._active_goal = Frontier(centroid=(3.0, 3.0), size=10, distance=1.0, score=1.0)
+    node._reject_active_goal("timeout")
+    spin_for(node, 1.5)
+
+    assert seen, "必须把无法探索的区域发出来，操作员才知道哪里去不了"
+    payload = json.loads(seen[-1].data)
+    assert payload == [{"x": 3.0, "y": 3.0}]
+
+
+def test_status_reports_unexplorable_count(node_factory):
+    import json
+
+    from semantic_rtabmap.frontier import Frontier
+
+    node = node_factory(autostart=True, dry_run=True, replan_period=10.0,
+                        unexplorable_failures=1, unexplorable_radius=1.5)
+    statuses = []
+    node.create_subscription(String, "/exploration/status", statuses.append, 10)
+    node._active_goal = Frontier(centroid=(3.0, 3.0), size=10, distance=1.0, score=1.0)
+    node._reject_active_goal("timeout")
+    spin_for(node, 1.5)
+    payload = json.loads(statuses[-1].data)
+    assert payload["unexplorable"] == 1
